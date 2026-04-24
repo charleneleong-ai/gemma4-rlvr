@@ -101,6 +101,12 @@ hf_cache/
 unsloth_compiled_cache/
 outputs/
 
+## Wandb run-local mirrors (synced to wandb.ai; no need in git)
+wandb/
+
+## Local-only secrets
+.env
+
 ## Synthetic dataset artefacts — regeneratable via dd_explainer_data_generator.py.
 ## The sidecar .meta.json files ARE committed (small, capture provenance).
 data/dd_dataset_*.jsonl

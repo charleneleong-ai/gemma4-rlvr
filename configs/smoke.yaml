@@ -1,0 +1,16 @@
+# Smoke test — 2 steps, tiny completion budget, no wandb. Good for CI / local sanity.
+
+defaults:
+  - train
+  - _self_
+
+train:
+  max_steps: 2
+  warmup_steps: 1
+  max_completion_length: 512
+  save_steps: 1000
+  save_path: /tmp/test_lora_smoke
+
+wandb:
+  mode: disabled
+  tags: ["smoke"]

@@ -1,0 +1,38 @@
+# Default training config — 300-step GRPO on E4B-it with wandb logging.
+
+train:
+  model_name: unsloth/gemma-4-E4B-it
+  data_dir: /workspace/gemma4_rl/data
+  save_path: gemma_4_lora
+  output_dir: outputs
+
+  max_seq_length: 6144
+  max_completion_length: 1024
+
+  batch_size: 8
+  grad_accum: 1
+  num_generations: 4
+
+  learning_rate: 1.0e-5
+  beta: 0.04
+  weight_decay: 0.001
+
+  lora_rank: 64
+
+  max_steps: 300
+  warmup_steps: 30
+  save_steps: 50
+  seed: 42
+
+  patience: 0             # 0 disables early stopping
+  plateau_window: 10
+  plateau_delta: 0.05
+
+wandb:
+  # Project / entity fall back to env (.env or shell), with sensible defaults.
+  # `mode` is pinned per-YAML so smoke runs can force `disabled` even when
+  # WANDB_API_KEY is set.
+  project: ${oc.env:WANDB_PROJECT, "gemma4-rlvr"}
+  entity: ${oc.env:WANDB_ENTITY, "chaleong"}
+  mode: online
+  tags: ["gemma4", "rlvr", "dd-explainer", "e4b"]
