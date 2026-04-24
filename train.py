@@ -123,19 +123,26 @@ class RewardPlateauCallback(TrainerCallback):
 
 
 class WandbMetricDefsCallback(TrainerCallback):
-    """Register wandb metric groupings and summary aggregations on train start.
+    """Register wandb metric groupings + emit a rolling `train/summary/*` panel.
 
-    Effects on the wandb run:
-      - Every `train/*` metric plots against `train/global_step` as the x-axis
-        (regardless of log order).
-      - `train/reward` and per-reward means are surfaced as "max so far" in the
-        run's top-level summary panel.
-      - `train/kl`, `train/grad_norm`, `train/loss` are surfaced as "last value".
+    Two effects:
 
-    Produces the at-a-glance panel: best reward reached, final KL / loss /
-    grad_norm — the metrics that tell you whether the run is healthy without
-    opening the chart view.
+    1. `on_train_begin` calls `wandb.define_metric(...)` so:
+         - Every `train/*` metric plots against `train/global_step`.
+         - The run card / runs table show best reward (max), final KL (last),
+           min completion length (min), etc.
+
+    2. `on_log` computes running aggregates (best-so-far reward, latest KL, ...)
+       and logs them under `train/summary/*`. This creates a dedicated "summary"
+       panel group in the Workspace tab — monotonic climb for "best", live
+       values for "current" — that you can pin to the top of the dashboard
+       instead of hunting across `train/rewards/`, `train/completions/`, etc.
     """
+
+    def __init__(self) -> None:
+        self._best_reward: float = float("-inf")
+        self._best_per_reward: dict[str, float] = {}
+        self._min_comp_length: int | None = None
 
     def on_train_begin(self, args, state, control, **kwargs):
         import wandb
@@ -144,6 +151,7 @@ class WandbMetricDefsCallback(TrainerCallback):
         # `define_metric` only accepts *suffix* wildcards, not interior ones.
         wandb.define_metric("train/global_step")
         wandb.define_metric("train/*", step_metric="train/global_step")
+        wandb.define_metric("train/summary/*", step_metric="train/global_step")
         # Climb-metrics: promote the max reached.
         wandb.define_metric("train/reward", summary="max")
         for fn in REWARD_FUNCS:
@@ -154,6 +162,51 @@ class WandbMetricDefsCallback(TrainerCallback):
         wandb.define_metric("train/grad_norm", summary="last")
         wandb.define_metric("train/completions/clipped_ratio", summary="last")
         wandb.define_metric("train/completions/min_length", summary="min")
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+        import wandb
+        if wandb.run is None:
+            return
+
+        out: dict[str, float] = {}
+
+        # Running-best reward (monotonic up).
+        r = logs.get("reward")
+        if r is not None:
+            self._best_reward = max(self._best_reward, float(r))
+            out["train/summary/best_reward"] = self._best_reward
+
+        # Per-reward running max — one curve per reward function.
+        for fn in REWARD_FUNCS:
+            v = logs.get(f"rewards/{fn.__name__}/mean")
+            if v is None:
+                continue
+            prev = self._best_per_reward.get(fn.__name__, float("-inf"))
+            best = max(prev, float(v))
+            self._best_per_reward[fn.__name__] = best
+            out[f"train/summary/best_{fn.__name__}"] = best
+
+        # Running-min completion length (catches reward-hacking — monotonic down).
+        ml = logs.get("completions/min_length")
+        if ml is not None:
+            self._min_comp_length = int(ml) if self._min_comp_length is None \
+                else min(self._min_comp_length, int(ml))
+            out["train/summary/min_completion_length"] = self._min_comp_length
+
+        # Current-state safety signals (not aggregated — the live value matters).
+        for src, dst in (
+            ("kl", "train/summary/current_kl"),
+            ("grad_norm", "train/summary/current_grad_norm"),
+            ("loss", "train/summary/current_loss"),
+        ):
+            v = logs.get(src)
+            if v is not None:
+                out[dst] = float(v)
+
+        if out:
+            wandb.log(out)
 
 
 # =============================================================================

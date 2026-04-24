@@ -51,17 +51,25 @@ error-analysis reports. These are the metrics the demo is optimising.
 
 ## At-a-glance workspace layout
 
-Pin this single row at the top of the wandb workspace (or add to a
-persistent Report):
+`train.py:WandbMetricDefsCallback` step-wise logs running aggregates under
+a dedicated **`train/summary/*`** namespace, which appears as its own
+collapsible section in the workspace tab between `train/rewards/` and
+`train/completions/`. Pin that section at the top — it's the one-glance
+view of the whole run.
 
-```
-reward                                    reward_triggers_match_ground_truth/mean   kl
-reward_previous_dd_amount_correct/mean    reward_no_hallucinated_facts/mean         grad_norm
-completions/min_length                    completions/clipped_ratio                 step_time
-```
+| Panel (under `train/summary/`) | What it shows |
+|---|---|
+| `best_reward` | Running max of the GRPO scalar — should climb monotonically. |
+| `best_reward_triggers_match_ground_truth` | Running max of the F1 vs oracle. The headline correctness number. |
+| `best_reward_no_hallucinated_facts` | Running max of the production-failure check #2. |
+| `best_reward_previous_dd_amount_correct` | Running max of failure check #1. |
+| `best_reward_underpayment_language_constrained` | Running max of failure check #3. |
+| `best_reward_schema_valid` / `best_reward_triggers_in_enum` / `best_reward_explanations_well_formed` | Shape rewards — saturate fast. |
+| `current_kl` / `current_loss` / `current_grad_norm` | Live numerical-health signals. |
+| `min_completion_length` | Running min — drops to 1 = reward-hacking caught. |
 
-Nine panels. If `reward` trends up and `kl` stays below 0.5, the rest is
-tuning detail.
+If `best_reward` and `best_reward_triggers_match_ground_truth` trend up
+and `current_kl` stays below 0.5, the rest is tuning detail.
 
 ## What the callback does
 
