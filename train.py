@@ -122,6 +122,38 @@ class RewardPlateauCallback(TrainerCallback):
                 control.should_training_stop = True
 
 
+class WandbMetricDefsCallback(TrainerCallback):
+    """Register wandb metric groupings and summary aggregations on train start.
+
+    Effects on the wandb run:
+      - Every `train/*` metric plots against `train/global_step` as the x-axis
+        (regardless of log order).
+      - `train/reward` and per-reward means are surfaced as "max so far" in the
+        run's top-level summary panel.
+      - `train/kl`, `train/grad_norm`, `train/loss` are surfaced as "last value".
+
+    Produces the at-a-glance panel: best reward reached, final KL / loss /
+    grad_norm — the metrics that tell you whether the run is healthy without
+    opening the chart view.
+    """
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        import wandb
+        if wandb.run is None:
+            return
+        wandb.define_metric("train/global_step")
+        wandb.define_metric("train/*", step_metric="train/global_step")
+        # Climb-metrics: promote the max reached.
+        wandb.define_metric("train/reward", summary="max")
+        wandb.define_metric("train/rewards/*/mean", summary="max")
+        # Last-value metrics: show the final state.
+        wandb.define_metric("train/kl", summary="last")
+        wandb.define_metric("train/loss", summary="last")
+        wandb.define_metric("train/grad_norm", summary="last")
+        wandb.define_metric("train/completions/clipped_ratio", summary="last")
+        wandb.define_metric("train/completions/min_length", summary="min")
+
+
 # =============================================================================
 # Model / dataset loading
 # =============================================================================
@@ -388,6 +420,8 @@ def train(
             f"Early stopping armed: patience={t.patience}, "
             f"window={t.plateau_window}, min_delta={t.plateau_delta}"
         )
+    if settings.wandb.enabled:
+        callbacks.append(WandbMetricDefsCallback())
 
     training_args = GRPOConfig(
         temperature=1.0,
