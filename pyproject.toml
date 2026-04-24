@@ -1,0 +1,43 @@
+[project]
+name = "gemma4-rl"
+version = "0.1.0"
+description = "Gemma 4 Reinforcement Learning (GRPO) — Sudoku solving on A100"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.8.0",
+    "triton>=3.4.0",
+    "torchvision",
+    "numpy",
+    "pillow",
+    "bitsandbytes",
+    "transformers>=5.5.0",
+    "tokenizers",
+    "trl>=0.28.0",
+    "peft",
+    "datasets",
+    "timm",
+    "unsloth @ git+https://github.com/unslothai/unsloth",
+    "unsloth-zoo[base] @ git+https://github.com/unslothai/unsloth-zoo",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter",
+    "jupyterlab",
+    "ipywidgets",
+    "tensorboard",
+]
+
+[tool.uv]
+# unsloth-zoo pins trl<0.24.0 but the notebook installs trl>=0.28.0 with --no-deps;
+# override here to match that intent.
+override-dependencies = [
+    "trl>=0.28.0",
+]
+# Unsloth builds from source — skip binary resolution for these
+no-binary-package = ["unsloth", "unsloth-zoo"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
