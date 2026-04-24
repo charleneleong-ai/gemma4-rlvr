@@ -141,11 +141,13 @@ class WandbMetricDefsCallback(TrainerCallback):
         import wandb
         if wandb.run is None:
             return
+        # `define_metric` only accepts *suffix* wildcards, not interior ones.
         wandb.define_metric("train/global_step")
         wandb.define_metric("train/*", step_metric="train/global_step")
         # Climb-metrics: promote the max reached.
         wandb.define_metric("train/reward", summary="max")
-        wandb.define_metric("train/rewards/*/mean", summary="max")
+        for fn in REWARD_FUNCS:
+            wandb.define_metric(f"train/rewards/{fn.__name__}/mean", summary="max")
         # Last-value metrics: show the final state.
         wandb.define_metric("train/kl", summary="last")
         wandb.define_metric("train/loss", summary="last")
