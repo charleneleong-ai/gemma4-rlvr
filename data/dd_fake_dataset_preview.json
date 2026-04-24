@@ -1,0 +1,131 @@
+[
+  {
+    "ground_truth_triggers": [
+      "Change in unit rates"
+    ],
+    "latest_dd_change": {
+      "datetime_from": "2026-02-20T17:00:00",
+      "datetime_to": null,
+      "is_currently_active_DD": true,
+      "reason_for_DD_change": "automatic direct debit review",
+      "dd_amount": 84.15,
+      "dd_amount_change": -26.32,
+      "recommended_dd_amount": 79.96,
+      "yearly_predicted_energy_cost_gbp": 1009.8,
+      "description": "Your DD has been updated.",
+      "collectionDay": 8,
+      "is_exemption": false,
+      "exemption_expiry_date": null,
+      "is_amount_manually_reduced_lower_than_recommended_amount": false
+    },
+    "account_context_summary": {
+      "dd_change_history_len": 2,
+      "payment_history_len": 6,
+      "contract_history_len": 1,
+      "projected_consumption_history": {
+        "electricity": {
+          "change_kwh": 0.0,
+          "change_percent": 0.0,
+          "latest_projected_annual_consumption_kwh": 3000.0,
+          "latest_projection_date": "2026-02-20",
+          "previous_projected_annual_consumption_kwh": 3000.0,
+          "previous_projection_date": "2025-03-27"
+        },
+        "gas": {
+          "change_kwh": 0.0,
+          "change_percent": 0.0,
+          "latest_projected_annual_consumption_kwh": 10000.0,
+          "latest_projection_date": "2026-02-20",
+          "previous_projected_annual_consumption_kwh": 10000.0,
+          "previous_projection_date": "2025-03-27"
+        }
+      }
+    }
+  },
+  {
+    "ground_truth_triggers": [
+      "Change in usage"
+    ],
+    "latest_dd_change": {
+      "datetime_from": "2026-04-22T13:00:00",
+      "datetime_to": null,
+      "is_currently_active_DD": true,
+      "reason_for_DD_change": "automatic direct debit review",
+      "dd_amount": 88.54,
+      "dd_amount_change": -19.13,
+      "recommended_dd_amount": 87.13,
+      "yearly_predicted_energy_cost_gbp": 1062.48,
+      "description": "Your DD has been updated.",
+      "collectionDay": 24,
+      "is_exemption": false,
+      "exemption_expiry_date": null,
+      "is_amount_manually_reduced_lower_than_recommended_amount": false
+    },
+    "account_context_summary": {
+      "dd_change_history_len": 2,
+      "payment_history_len": 6,
+      "contract_history_len": 1,
+      "projected_consumption_history": {
+        "electricity": {
+          "change_kwh": 0.0,
+          "change_percent": 0.0,
+          "latest_projected_annual_consumption_kwh": 3000.0,
+          "latest_projection_date": "2026-04-22",
+          "previous_projected_annual_consumption_kwh": 3000.0,
+          "previous_projection_date": "2025-07-20"
+        },
+        "gas": {
+          "change_kwh": -1659.2,
+          "change_percent": -16.59,
+          "latest_projected_annual_consumption_kwh": 8340.8,
+          "latest_projection_date": "2026-04-22",
+          "previous_projected_annual_consumption_kwh": 10000.0,
+          "previous_projection_date": "2025-07-20"
+        }
+      }
+    }
+  },
+  {
+    "ground_truth_triggers": [
+      "Change in usage"
+    ],
+    "latest_dd_change": {
+      "datetime_from": "2026-01-28T13:00:00",
+      "datetime_to": null,
+      "is_currently_active_DD": true,
+      "reason_for_DD_change": "automatic direct debit review",
+      "dd_amount": 126.23,
+      "dd_amount_change": 10.9,
+      "recommended_dd_amount": 121.39,
+      "yearly_predicted_energy_cost_gbp": 1514.76,
+      "description": "Your DD has been updated.",
+      "collectionDay": 28,
+      "is_exemption": false,
+      "exemption_expiry_date": null,
+      "is_amount_manually_reduced_lower_than_recommended_amount": false
+    },
+    "account_context_summary": {
+      "dd_change_history_len": 2,
+      "payment_history_len": 6,
+      "contract_history_len": 1,
+      "projected_consumption_history": {
+        "electricity": {
+          "change_kwh": 0.0,
+          "change_percent": 0.0,
+          "latest_projected_annual_consumption_kwh": 3000.0,
+          "latest_projection_date": "2026-01-28",
+          "previous_projected_annual_consumption_kwh": 3000.0,
+          "previous_projection_date": "2025-03-13"
+        },
+        "gas": {
+          "change_kwh": 1562.1,
+          "change_percent": 15.62,
+          "latest_projected_annual_consumption_kwh": 11562.1,
+          "latest_projection_date": "2026-01-28",
+          "previous_projected_annual_consumption_kwh": 10000.0,
+          "previous_projection_date": "2025-03-13"
+        }
+      }
+    }
+  }
+]

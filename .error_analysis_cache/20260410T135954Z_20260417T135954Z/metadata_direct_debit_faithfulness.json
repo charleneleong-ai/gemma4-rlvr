@@ -1,0 +1,16 @@
+{
+  "evaluator_name": "direct_debit_faithfulness",
+  "graph_name": "direct_debit_explainer",
+  "total_traces": 904,
+  "failed_traces": 318,
+  "failure_rate": 0.35176991150442477,
+  "pii_anonymised": true,
+  "langsmith_project": "dd-explainer-demo",
+  "langsmith_endpoint": "https://langsmith.example.com/api/v1",
+  "langsmith_project_path": "https://langsmith.example.com/o/00000000-0000-0000-0000-000000000000/projects/p/00000000-0000-0000-0000-000000000000",
+  "analysis_start_time": "2026-04-10T13:59:54+00:00",
+  "analysis_end_time": "2026-04-17T13:59:54+00:00",
+  "dashboard_url": "",
+  "dashboard_failure_rate": null,
+  "dashboard_total_traces_24h": 0
+}

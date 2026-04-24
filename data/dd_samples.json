@@ -1,0 +1,718 @@
+[
+  {
+    "target_triggers": [
+      "Change in usage"
+    ],
+    "input": {
+      "account_context": {
+        "dd_change_history": [
+          {
+            "datetime_from": "2025-03-14T10:00:00",
+            "datetime_to": "2026-02-08T10:00:00",
+            "is_currently_active_DD": false,
+            "reason_for_DD_change": "price cap update",
+            "dd_amount": 141.2,
+            "dd_amount_change": 0.0,
+            "recommended_dd_amount": 144.02,
+            "yearly_predicted_energy_cost_gbp": 1694.4,
+            "description": "Previous DD review",
+            "collectionDay": 2,
+            "is_exemption": false,
+            "exemption_expiry_date": null,
+            "is_amount_manually_reduced_lower_than_recommended_amount": false
+          },
+          {
+            "datetime_from": "2026-02-08T10:00:00",
+            "datetime_to": null,
+            "is_currently_active_DD": true,
+            "reason_for_DD_change": "automatic direct debit review",
+            "dd_amount": 177.75,
+            "dd_amount_change": 36.55,
+            "recommended_dd_amount": 169.39,
+            "yearly_predicted_energy_cost_gbp": 2133.0,
+            "description": "Your DD has been updated.",
+            "collectionDay": 2,
+            "is_exemption": false,
+            "exemption_expiry_date": null,
+            "is_amount_manually_reduced_lower_than_recommended_amount": false
+          }
+        ],
+        "payment_history": [
+          {
+            "transaction_timestamp": "2025-08-24T10:00:00",
+            "transaction_amount_in_pounds": 141.2,
+            "is_payment_successful": true,
+            "payment_period": "Aug 2025"
+          },
+          {
+            "transaction_timestamp": "2025-09-21T10:00:00",
+            "transaction_amount_in_pounds": 141.2,
+            "is_payment_successful": true,
+            "payment_period": "Sep 2025"
+          },
+          {
+            "transaction_timestamp": "2025-10-19T10:00:00",
+            "transaction_amount_in_pounds": 141.2,
+            "is_payment_successful": true,
+            "payment_period": "Oct 2025"
+          },
+          {
+            "transaction_timestamp": "2025-11-16T10:00:00",
+            "transaction_amount_in_pounds": 141.2,
+            "is_payment_successful": true,
+            "payment_period": "Nov 2025"
+          },
+          {
+            "transaction_timestamp": "2025-12-14T10:00:00",
+            "transaction_amount_in_pounds": 141.2,
+            "is_payment_successful": true,
+            "payment_period": "Dec 2025"
+          },
+          {
+            "transaction_timestamp": "2026-01-11T10:00:00",
+            "transaction_amount_in_pounds": 141.2,
+            "is_payment_successful": true,
+            "payment_period": "Jan 2026"
+          }
+        ],
+        "contract_history": [
+          {
+            "tariff_name": "Simpler Energy",
+            "is_current_contract": true,
+            "contract_start_date": "2022-08-28",
+            "contract_end_date": null,
+            "contract_rates_history": [
+              {
+                "rate_effective_from": "2022-08-28",
+                "rate_effective_to": null,
+                "rates": [
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.27,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  },
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "standing_charge",
+                    "amount_GBP": 0.53,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  },
+                  {
+                    "fuel": "gas",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.07,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "projected_consumption_history": {
+          "electricity": {
+            "change_kwh": 304.6,
+            "change_percent": 10.15,
+            "latest_projected_annual_consumption_kwh": 3304.6,
+            "latest_projection_date": "2026-02-08",
+            "previous_projected_annual_consumption_kwh": 3000.0,
+            "previous_projection_date": "2025-03-14"
+          },
+          "gas": {
+            "change_kwh": 0.0,
+            "change_percent": 0.0,
+            "latest_projected_annual_consumption_kwh": 10000.0,
+            "latest_projection_date": "2026-02-08",
+            "previous_projected_annual_consumption_kwh": 10000.0,
+            "previous_projection_date": "2025-03-14"
+          }
+        }
+      },
+      "latest_dd_change": {
+        "datetime_from": "2026-02-08T10:00:00",
+        "datetime_to": null,
+        "is_currently_active_DD": true,
+        "reason_for_DD_change": "automatic direct debit review",
+        "dd_amount": 177.75,
+        "dd_amount_change": 36.55,
+        "recommended_dd_amount": 169.39,
+        "yearly_predicted_energy_cost_gbp": 2133.0,
+        "description": "Your DD has been updated.",
+        "collectionDay": 2,
+        "is_exemption": false,
+        "exemption_expiry_date": null,
+        "is_amount_manually_reduced_lower_than_recommended_amount": false
+      }
+    }
+  },
+  {
+    "target_triggers": [
+      "First DD review since account start"
+    ],
+    "input": {
+      "account_context": {
+        "dd_change_history": [
+          {
+            "datetime_from": "2026-04-08T15:00:00",
+            "datetime_to": null,
+            "is_currently_active_DD": true,
+            "reason_for_DD_change": "automatic direct debit review",
+            "dd_amount": 165.34,
+            "dd_amount_change": 8.21,
+            "recommended_dd_amount": 161.67,
+            "yearly_predicted_energy_cost_gbp": 1984.08,
+            "description": "Your DD has been updated.",
+            "collectionDay": 11,
+            "is_exemption": false,
+            "exemption_expiry_date": null,
+            "is_amount_manually_reduced_lower_than_recommended_amount": false
+          }
+        ],
+        "payment_history": [
+          {
+            "transaction_timestamp": "2025-10-22T15:00:00",
+            "transaction_amount_in_pounds": 157.13,
+            "is_payment_successful": true,
+            "payment_period": "Oct 2025"
+          },
+          {
+            "transaction_timestamp": "2025-11-19T15:00:00",
+            "transaction_amount_in_pounds": 157.13,
+            "is_payment_successful": true,
+            "payment_period": "Nov 2025"
+          },
+          {
+            "transaction_timestamp": "2025-12-17T15:00:00",
+            "transaction_amount_in_pounds": 157.13,
+            "is_payment_successful": true,
+            "payment_period": "Dec 2025"
+          },
+          {
+            "transaction_timestamp": "2026-01-14T15:00:00",
+            "transaction_amount_in_pounds": 157.13,
+            "is_payment_successful": true,
+            "payment_period": "Jan 2026"
+          },
+          {
+            "transaction_timestamp": "2026-02-11T15:00:00",
+            "transaction_amount_in_pounds": 157.13,
+            "is_payment_successful": true,
+            "payment_period": "Feb 2026"
+          },
+          {
+            "transaction_timestamp": "2026-03-11T15:00:00",
+            "transaction_amount_in_pounds": 157.13,
+            "is_payment_successful": true,
+            "payment_period": "Mar 2026"
+          }
+        ],
+        "contract_history": [
+          {
+            "tariff_name": "Better Energy Fixed",
+            "is_current_contract": true,
+            "contract_start_date": "2025-09-20",
+            "contract_end_date": null,
+            "contract_rates_history": [
+              {
+                "rate_effective_from": "2025-09-20",
+                "rate_effective_to": null,
+                "rates": [
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.27,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  },
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "standing_charge",
+                    "amount_GBP": 0.53,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  },
+                  {
+                    "fuel": "gas",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.07,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "projected_consumption_history": {
+          "electricity": {
+            "change_kwh": 0.0,
+            "change_percent": 0.0,
+            "latest_projected_annual_consumption_kwh": 3000.0,
+            "latest_projection_date": "2026-04-08",
+            "previous_projected_annual_consumption_kwh": 3000.0,
+            "previous_projection_date": "2025-04-15"
+          },
+          "gas": {
+            "change_kwh": 0.0,
+            "change_percent": 0.0,
+            "latest_projected_annual_consumption_kwh": 10000.0,
+            "latest_projection_date": "2026-04-08",
+            "previous_projected_annual_consumption_kwh": 10000.0,
+            "previous_projection_date": "2025-04-15"
+          }
+        }
+      },
+      "latest_dd_change": {
+        "datetime_from": "2026-04-08T15:00:00",
+        "datetime_to": null,
+        "is_currently_active_DD": true,
+        "reason_for_DD_change": "automatic direct debit review",
+        "dd_amount": 165.34,
+        "dd_amount_change": 8.21,
+        "recommended_dd_amount": 161.67,
+        "yearly_predicted_energy_cost_gbp": 1984.08,
+        "description": "Your DD has been updated.",
+        "collectionDay": 11,
+        "is_exemption": false,
+        "exemption_expiry_date": null,
+        "is_amount_manually_reduced_lower_than_recommended_amount": false
+      }
+    }
+  },
+  {
+    "target_triggers": [
+      "Change in usage",
+      "Manual reduction"
+    ],
+    "input": {
+      "account_context": {
+        "dd_change_history": [
+          {
+            "datetime_from": "2025-03-22T09:00:00",
+            "datetime_to": "2026-01-13T09:00:00",
+            "is_currently_active_DD": false,
+            "reason_for_DD_change": "customer request",
+            "dd_amount": 161.7,
+            "dd_amount_change": 0.0,
+            "recommended_dd_amount": 164.93,
+            "yearly_predicted_energy_cost_gbp": 1940.4,
+            "description": "Previous DD review",
+            "collectionDay": 13,
+            "is_exemption": false,
+            "exemption_expiry_date": null,
+            "is_amount_manually_reduced_lower_than_recommended_amount": true
+          },
+          {
+            "datetime_from": "2026-01-13T09:00:00",
+            "datetime_to": null,
+            "is_currently_active_DD": true,
+            "reason_for_DD_change": "automatic direct debit review",
+            "dd_amount": 189.02,
+            "dd_amount_change": 27.32,
+            "recommended_dd_amount": 181.06,
+            "yearly_predicted_energy_cost_gbp": 2268.24,
+            "description": "Your DD has been updated.",
+            "collectionDay": 13,
+            "is_exemption": false,
+            "exemption_expiry_date": null,
+            "is_amount_manually_reduced_lower_than_recommended_amount": false
+          }
+        ],
+        "payment_history": [
+          {
+            "transaction_timestamp": "2025-07-29T09:00:00",
+            "transaction_amount_in_pounds": 161.7,
+            "is_payment_successful": true,
+            "payment_period": "Jul 2025"
+          },
+          {
+            "transaction_timestamp": "2025-08-26T09:00:00",
+            "transaction_amount_in_pounds": 161.7,
+            "is_payment_successful": true,
+            "payment_period": "Aug 2025"
+          },
+          {
+            "transaction_timestamp": "2025-09-23T09:00:00",
+            "transaction_amount_in_pounds": 161.7,
+            "is_payment_successful": true,
+            "payment_period": "Sep 2025"
+          },
+          {
+            "transaction_timestamp": "2025-10-21T09:00:00",
+            "transaction_amount_in_pounds": 161.7,
+            "is_payment_successful": true,
+            "payment_period": "Oct 2025"
+          },
+          {
+            "transaction_timestamp": "2025-11-18T09:00:00",
+            "transaction_amount_in_pounds": 161.7,
+            "is_payment_successful": true,
+            "payment_period": "Nov 2025"
+          },
+          {
+            "transaction_timestamp": "2025-12-16T09:00:00",
+            "transaction_amount_in_pounds": 161.7,
+            "is_payment_successful": true,
+            "payment_period": "Dec 2025"
+          }
+        ],
+        "contract_history": [
+          {
+            "tariff_name": "Simpler Energy",
+            "is_current_contract": true,
+            "contract_start_date": "2021-04-09",
+            "contract_end_date": null,
+            "contract_rates_history": [
+              {
+                "rate_effective_from": "2021-04-09",
+                "rate_effective_to": null,
+                "rates": [
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.27,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  },
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "standing_charge",
+                    "amount_GBP": 0.53,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  },
+                  {
+                    "fuel": "gas",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.07,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "projected_consumption_history": {
+          "electricity": {
+            "change_kwh": 0.0,
+            "change_percent": 0.0,
+            "latest_projected_annual_consumption_kwh": 3000.0,
+            "latest_projection_date": "2026-01-13",
+            "previous_projected_annual_consumption_kwh": 3000.0,
+            "previous_projection_date": "2025-03-22"
+          },
+          "gas": {
+            "change_kwh": 1157.0,
+            "change_percent": 11.57,
+            "latest_projected_annual_consumption_kwh": 11157.0,
+            "latest_projection_date": "2026-01-13",
+            "previous_projected_annual_consumption_kwh": 10000.0,
+            "previous_projection_date": "2025-03-22"
+          }
+        }
+      },
+      "latest_dd_change": {
+        "datetime_from": "2026-01-13T09:00:00",
+        "datetime_to": null,
+        "is_currently_active_DD": true,
+        "reason_for_DD_change": "automatic direct debit review",
+        "dd_amount": 189.02,
+        "dd_amount_change": 27.32,
+        "recommended_dd_amount": 181.06,
+        "yearly_predicted_energy_cost_gbp": 2268.24,
+        "description": "Your DD has been updated.",
+        "collectionDay": 13,
+        "is_exemption": false,
+        "exemption_expiry_date": null,
+        "is_amount_manually_reduced_lower_than_recommended_amount": false
+      }
+    }
+  },
+  {
+    "target_triggers": [
+      "First DD review since account start"
+    ],
+    "input": {
+      "account_context": {
+        "dd_change_history": [
+          {
+            "datetime_from": "2026-01-22T11:00:00",
+            "datetime_to": null,
+            "is_currently_active_DD": true,
+            "reason_for_DD_change": "automatic direct debit review",
+            "dd_amount": 213.6,
+            "dd_amount_change": 35.37,
+            "recommended_dd_amount": 216.5,
+            "yearly_predicted_energy_cost_gbp": 2563.2,
+            "description": "Your DD has been updated.",
+            "collectionDay": 15,
+            "is_exemption": false,
+            "exemption_expiry_date": null,
+            "is_amount_manually_reduced_lower_than_recommended_amount": false
+          }
+        ],
+        "payment_history": [
+          {
+            "transaction_timestamp": "2025-08-07T11:00:00",
+            "transaction_amount_in_pounds": 178.23,
+            "is_payment_successful": true,
+            "payment_period": "Aug 2025"
+          },
+          {
+            "transaction_timestamp": "2025-09-04T11:00:00",
+            "transaction_amount_in_pounds": 178.23,
+            "is_payment_successful": true,
+            "payment_period": "Sep 2025"
+          },
+          {
+            "transaction_timestamp": "2025-10-02T11:00:00",
+            "transaction_amount_in_pounds": 178.23,
+            "is_payment_successful": true,
+            "payment_period": "Oct 2025"
+          },
+          {
+            "transaction_timestamp": "2025-10-30T11:00:00",
+            "transaction_amount_in_pounds": 178.23,
+            "is_payment_successful": true,
+            "payment_period": "Oct 2025"
+          },
+          {
+            "transaction_timestamp": "2025-11-27T11:00:00",
+            "transaction_amount_in_pounds": 178.23,
+            "is_payment_successful": true,
+            "payment_period": "Nov 2025"
+          },
+          {
+            "transaction_timestamp": "2025-12-25T11:00:00",
+            "transaction_amount_in_pounds": 178.23,
+            "is_payment_successful": true,
+            "payment_period": "Dec 2025"
+          }
+        ],
+        "contract_history": [
+          {
+            "tariff_name": "Simpler Energy",
+            "is_current_contract": true,
+            "contract_start_date": "2025-04-21",
+            "contract_end_date": null,
+            "contract_rates_history": [
+              {
+                "rate_effective_from": "2025-04-21",
+                "rate_effective_to": null,
+                "rates": [
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.27,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  },
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "standing_charge",
+                    "amount_GBP": 0.53,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  },
+                  {
+                    "fuel": "gas",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.07,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "projected_consumption_history": {
+          "electricity": {
+            "change_kwh": 0.0,
+            "change_percent": 0.0,
+            "latest_projected_annual_consumption_kwh": 3000.0,
+            "latest_projection_date": "2026-01-22",
+            "previous_projected_annual_consumption_kwh": 3000.0,
+            "previous_projection_date": "2025-04-20"
+          },
+          "gas": {
+            "change_kwh": 0.0,
+            "change_percent": 0.0,
+            "latest_projected_annual_consumption_kwh": 10000.0,
+            "latest_projection_date": "2026-01-22",
+            "previous_projected_annual_consumption_kwh": 10000.0,
+            "previous_projection_date": "2025-04-20"
+          }
+        }
+      },
+      "latest_dd_change": {
+        "datetime_from": "2026-01-22T11:00:00",
+        "datetime_to": null,
+        "is_currently_active_DD": true,
+        "reason_for_DD_change": "automatic direct debit review",
+        "dd_amount": 213.6,
+        "dd_amount_change": 35.37,
+        "recommended_dd_amount": 216.5,
+        "yearly_predicted_energy_cost_gbp": 2563.2,
+        "description": "Your DD has been updated.",
+        "collectionDay": 15,
+        "is_exemption": false,
+        "exemption_expiry_date": null,
+        "is_amount_manually_reduced_lower_than_recommended_amount": false
+      }
+    }
+  },
+  {
+    "target_triggers": [
+      "Change in unit rates"
+    ],
+    "input": {
+      "account_context": {
+        "dd_change_history": [
+          {
+            "datetime_from": "2025-05-16T10:00:00",
+            "datetime_to": "2026-01-20T10:00:00",
+            "is_currently_active_DD": false,
+            "reason_for_DD_change": "customer request",
+            "dd_amount": 147.5,
+            "dd_amount_change": 0.0,
+            "recommended_dd_amount": 150.45,
+            "yearly_predicted_energy_cost_gbp": 1770.0,
+            "description": "Previous DD review",
+            "collectionDay": 22,
+            "is_exemption": false,
+            "exemption_expiry_date": null,
+            "is_amount_manually_reduced_lower_than_recommended_amount": false
+          },
+          {
+            "datetime_from": "2026-01-20T10:00:00",
+            "datetime_to": null,
+            "is_currently_active_DD": true,
+            "reason_for_DD_change": "automatic direct debit review",
+            "dd_amount": 160.73,
+            "dd_amount_change": 13.23,
+            "recommended_dd_amount": 157.91,
+            "yearly_predicted_energy_cost_gbp": 1928.76,
+            "description": "Your DD has been updated.",
+            "collectionDay": 22,
+            "is_exemption": false,
+            "exemption_expiry_date": null,
+            "is_amount_manually_reduced_lower_than_recommended_amount": false
+          }
+        ],
+        "payment_history": [
+          {
+            "transaction_timestamp": "2025-08-05T10:00:00",
+            "transaction_amount_in_pounds": 147.5,
+            "is_payment_successful": true,
+            "payment_period": "Aug 2025"
+          },
+          {
+            "transaction_timestamp": "2025-09-02T10:00:00",
+            "transaction_amount_in_pounds": 147.5,
+            "is_payment_successful": true,
+            "payment_period": "Sep 2025"
+          },
+          {
+            "transaction_timestamp": "2025-09-30T10:00:00",
+            "transaction_amount_in_pounds": 147.5,
+            "is_payment_successful": true,
+            "payment_period": "Sep 2025"
+          },
+          {
+            "transaction_timestamp": "2025-10-28T10:00:00",
+            "transaction_amount_in_pounds": 147.5,
+            "is_payment_successful": true,
+            "payment_period": "Oct 2025"
+          },
+          {
+            "transaction_timestamp": "2025-11-25T10:00:00",
+            "transaction_amount_in_pounds": 147.5,
+            "is_payment_successful": true,
+            "payment_period": "Nov 2025"
+          },
+          {
+            "transaction_timestamp": "2025-12-23T10:00:00",
+            "transaction_amount_in_pounds": 147.5,
+            "is_payment_successful": true,
+            "payment_period": "Dec 2025"
+          }
+        ],
+        "contract_history": [
+          {
+            "tariff_name": "Standard Variable",
+            "is_current_contract": true,
+            "contract_start_date": "2020-04-21",
+            "contract_end_date": null,
+            "contract_rates_history": [
+              {
+                "rate_effective_from": "2020-04-21",
+                "rate_effective_to": null,
+                "rates": [
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.27,
+                    "change_since_previous_rate": 0.033,
+                    "change_since_previous_rate_percent": 12.22
+                  },
+                  {
+                    "fuel": "electricity",
+                    "rate_type": "standing_charge",
+                    "amount_GBP": 0.53,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  },
+                  {
+                    "fuel": "gas",
+                    "rate_type": "unit_rate",
+                    "amount_GBP": 0.07,
+                    "change_since_previous_rate": 0.0,
+                    "change_since_previous_rate_percent": 0.0
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "projected_consumption_history": {
+          "electricity": {
+            "change_kwh": 0.0,
+            "change_percent": 0.0,
+            "latest_projected_annual_consumption_kwh": 3000.0,
+            "latest_projection_date": "2026-01-20",
+            "previous_projected_annual_consumption_kwh": 3000.0,
+            "previous_projection_date": "2025-05-16"
+          },
+          "gas": {
+            "change_kwh": 0.0,
+            "change_percent": 0.0,
+            "latest_projected_annual_consumption_kwh": 10000.0,
+            "latest_projection_date": "2026-01-20",
+            "previous_projected_annual_consumption_kwh": 10000.0,
+            "previous_projection_date": "2025-05-16"
+          }
+        }
+      },
+      "latest_dd_change": {
+        "datetime_from": "2026-01-20T10:00:00",
+        "datetime_to": null,
+        "is_currently_active_DD": true,
+        "reason_for_DD_change": "automatic direct debit review",
+        "dd_amount": 160.73,
+        "dd_amount_change": 13.23,
+        "recommended_dd_amount": 157.91,
+        "yearly_predicted_energy_cost_gbp": 1928.76,
+        "description": "Your DD has been updated.",
+        "collectionDay": 22,
+        "is_exemption": false,
+        "exemption_expiry_date": null,
+        "is_amount_manually_reduced_lower_than_recommended_amount": false
+      }
+    }
+  }
+]
