@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import random
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -35,13 +36,39 @@ def _setup_workspace_env(workspace: Path = Path("/workspace/gemma4_rl")) -> None
 
 
 # Apply env + import unsloth at module load so its patches land BEFORE any
-# transformers / trl / peft import anywhere in the process. Adds ~2-3 s to
-# `--help` latency but eliminates the "import unsloth before transformers"
-# warning and the associated ~10-15 % slowdown during training.
+# transformers / trl / peft import anywhere in the process. `load_dotenv` runs
+# first so WANDB_API_KEY / HF_TOKEN are in place before anything imports them.
 _setup_workspace_env()
-import unsloth  # noqa: E402, F401  (side-effectful import for patch order)
+from dotenv import load_dotenv  # noqa: E402
+load_dotenv()
+
+# Heavy imports: unsloth first (patching), then torch / transformers / trl /
+# datasets, then our own modules. Moving these to module top raises `--help`
+# latency to ~15 s but matches the "all imports at top" convention and keeps
+# every subcommand import-free at runtime.
+import unsloth  # noqa: E402, F401
 import typer  # noqa: E402
-from transformers import TrainerCallback  # noqa: E402
+import torch  # noqa: E402, F401
+import pandas as pd  # noqa: E402
+from datasets import Dataset  # noqa: E402
+from safetensors import safe_open  # noqa: E402
+from transformers import TextStreamer, TrainerCallback  # noqa: E402
+from trl import GRPOConfig, GRPOTrainer  # noqa: E402
+from unsloth import FastModel  # noqa: E402
+
+from config import Settings, load_hydra_settings  # noqa: E402
+from dd_explainer_data_generator import (  # noqa: E402
+    DDExplainerPromptInput,
+    Trigger,
+    build_chat_messages,
+    detect_triggers,
+    generate_dd_example,
+)
+from dd_explainer_rewards import (  # noqa: E402
+    REWARD_FUNCS,
+    parse_response,
+    score_completion,
+)
 
 app = typer.Typer(
     help="RLVR / GRPO training for the direct_debit_explainer mock.",
@@ -64,7 +91,6 @@ class RewardPlateauCallback(TrainerCallback):
     """
 
     def __init__(self, patience: int, window: int = 10, min_delta: float = 0.05):
-        from collections import deque
         self.patience = patience
         self.window = window
         self.min_delta = min_delta
@@ -112,7 +138,6 @@ def _load_model(
     - If `lora_path` is an existing directory, load the saved base + adapter from there.
     - Otherwise load `model_name` and attach a fresh LoRA (for training).
     """
-    from unsloth import FastModel
 
     if lora_path is not None and Path(lora_path).exists():
         typer.echo(f"Loading saved model + LoRA adapter from {lora_path}")
@@ -151,7 +176,6 @@ def _load_dataset(data_dir: Path):
     """Glob the newest `dd_dataset_*_*rows.jsonl` in `data_dir`; drop the __meta__
     header row and row_index column. Raises if nothing found.
     """
-    from datasets import Dataset
 
     jsonl_files = sorted(Path(data_dir).glob("dd_dataset_*_*rows.jsonl"))
     if not jsonl_files:
@@ -190,7 +214,6 @@ _PCH_FUEL_FIELDS = [
 
 def _scalar(v):
     """Unwrap pandas NaN / None to Python None; pass anything else through."""
-    import pandas as pd
     if v is None:
         return None
     try:
@@ -224,7 +247,6 @@ def reconstruct_pin_from_trace(row):
     graph) under `outputs.dd_account_context.*`, with the history arrays as
     JSON-encoded strings. Returns None if the row is missing required fields.
     """
-    from dd_explainer_data_generator import DDExplainerPromptInput
 
     try:
         latest = {f: _scalar(row.get(f"outputs.dd_account_context.latest_dd_change.{f}"))
@@ -262,7 +284,6 @@ def reconstruct_pin_from_trace(row):
 def prompt_token_length(tokenizer, pin) -> int:
     """How many tokens the rendered DD explainer prompt uses. Needed so the
     regression cell can filter out traces whose context overflows."""
-    from dd_explainer_data_generator import build_chat_messages
 
     text = tokenizer.apply_chat_template(
         build_chat_messages(pin), tokenize=False, add_generation_prompt=True
@@ -277,84 +298,121 @@ def prompt_token_length(tokenizer, pin) -> int:
 
 @app.command()
 def train(
-    model_name: str = typer.Option("unsloth/gemma-4-E4B-it", help="Unsloth model id."),
-    data_dir: Path = typer.Option(
-        Path("/workspace/gemma4_rl/data"), help="Directory containing dd_dataset_*.jsonl.",
+    config_name: str = typer.Option(
+        "train", "--config-name", "-c",
+        help="Hydra config name in configs/ (e.g. 'train', 'smoke', 'train_long').",
     ),
-    save_path: Path = typer.Option(
-        Path("gemma_4_lora"), help="Where to save the trained LoRA adapter.",
+    notes: Optional[str] = typer.Option(
+        None, "--notes", "-d",
+        help="Free-text note for the run, stored as wandb run notes.",
     ),
-    output_dir: Path = typer.Option(
-        Path("outputs"), help="Trainer checkpoints / logs directory.",
-    ),
-    max_seq_length: int = typer.Option(6144),
-    max_completion_length: int = typer.Option(1024),
-    batch_size: int = typer.Option(8, help="per_device_train_batch_size"),
-    grad_accum: int = typer.Option(1, help="gradient_accumulation_steps"),
-    num_generations: int = typer.Option(4, help="GRPO completions per prompt"),
-    learning_rate: float = typer.Option(1e-5),
-    beta: float = typer.Option(0.04, help="GRPO KL-penalty coefficient"),
-    lora_rank: int = typer.Option(64),
-    max_steps: int = typer.Option(300),
-    warmup_steps: int = typer.Option(30),
-    save_steps: int = typer.Option(50),
-    seed: int = typer.Option(42),
-    patience: int = typer.Option(
-        0,
+    # Tunables default to None so the YAML value is kept unless the user
+    # explicitly passes a CLI flag (CLI > YAML > Pydantic defaults).
+    model_name: Optional[str] = typer.Option(None),
+    data_dir: Optional[Path] = typer.Option(None),
+    save_path: Optional[Path] = typer.Option(None),
+    output_dir: Optional[Path] = typer.Option(None),
+    max_seq_length: Optional[int] = typer.Option(None),
+    max_completion_length: Optional[int] = typer.Option(None),
+    batch_size: Optional[int] = typer.Option(None),
+    grad_accum: Optional[int] = typer.Option(None),
+    num_generations: Optional[int] = typer.Option(None),
+    learning_rate: Optional[float] = typer.Option(None),
+    beta: Optional[float] = typer.Option(None),
+    lora_rank: Optional[int] = typer.Option(None),
+    max_steps: Optional[int] = typer.Option(None),
+    warmup_steps: Optional[int] = typer.Option(None),
+    save_steps: Optional[int] = typer.Option(None),
+    seed: Optional[int] = typer.Option(None),
+    patience: Optional[int] = typer.Option(
+        None,
         help="If > 0, stop early after this many consecutive logs with no moving-avg "
-             "reward improvement. Set to 0 to disable early stopping.",
+             "reward improvement.",
     ),
-    plateau_window: int = typer.Option(
-        10, help="Window (in logged steps) for the reward moving average.",
-    ),
-    plateau_delta: float = typer.Option(
-        0.05, help="Minimum MA reward improvement that counts as progress.",
+    plateau_window: Optional[int] = typer.Option(None),
+    plateau_delta: Optional[float] = typer.Option(None),
+    wandb_run_name: Optional[str] = typer.Option(
+        None, help="Weights & Biases run name. Auto-generated if omitted.",
     ),
 ) -> None:
     """Run GRPO training with the 7 verifiable rewards from dd_explainer_rewards."""
-    _setup_workspace_env()
+    # 1. Load Hydra YAML → typed Settings.
+    settings = load_hydra_settings(config_name)
 
-    if (batch_size * grad_accum) % num_generations != 0:
+    # 2. Overlay non-None CLI flags on top of the YAML.
+    cli_overrides = {
+        "model_name": model_name, "data_dir": data_dir, "save_path": save_path,
+        "output_dir": output_dir, "max_seq_length": max_seq_length,
+        "max_completion_length": max_completion_length, "batch_size": batch_size,
+        "grad_accum": grad_accum, "num_generations": num_generations,
+        "learning_rate": learning_rate, "beta": beta, "lora_rank": lora_rank,
+        "max_steps": max_steps, "warmup_steps": warmup_steps, "save_steps": save_steps,
+        "seed": seed, "patience": patience, "plateau_window": plateau_window,
+        "plateau_delta": plateau_delta,
+    }
+    for k, v in cli_overrides.items():
+        if v is not None:
+            setattr(settings.train, k, v)
+
+    if wandb_run_name is not None:
+        settings.wandb.run_name = wandb_run_name
+    if notes is not None:
+        settings.wandb.notes = notes
+
+    t = settings.train
+    if (t.batch_size * t.grad_accum) % t.num_generations != 0:
         raise typer.BadParameter(
             f"(batch_size * grad_accum) must be divisible by num_generations: "
-            f"{batch_size} * {grad_accum} = {batch_size * grad_accum}, "
-            f"num_generations = {num_generations}"
+            f"{t.batch_size} * {t.grad_accum} = {t.batch_size * t.grad_accum}, "
+            f"num_generations = {t.num_generations}"
         )
 
-    from trl import GRPOConfig, GRPOTrainer
-    from dd_explainer_rewards import REWARD_FUNCS
+    typer.echo(f"=== Resolved Settings (config_name={config_name!r}) ===")
+    typer.echo(settings.model_dump_json(indent=2))
+    typer.echo("===")
 
-    model, tokenizer = _load_model(model_name, max_seq_length, lora_rank)
-    dataset = _load_dataset(data_dir)
+    # 3. Wire wandb via env vars before trl/transformers spin up its callback.
+    settings.wandb.apply_env()
+    report_to = "wandb" if settings.wandb.enabled else "none"
+
+
+    model, tokenizer = _load_model(t.model_name, t.max_seq_length, t.lora_rank)
+    dataset = _load_dataset(t.data_dir)
 
     callbacks = []
-    if patience > 0:
-        callbacks.append(RewardPlateauCallback(patience=patience, window=plateau_window, min_delta=plateau_delta))
-        typer.echo(f"Early stopping armed: patience={patience}, window={plateau_window}, min_delta={plateau_delta}")
+    if t.patience > 0:
+        callbacks.append(RewardPlateauCallback(
+            patience=t.patience, window=t.plateau_window, min_delta=t.plateau_delta,
+        ))
+        typer.echo(
+            f"Early stopping armed: patience={t.patience}, "
+            f"window={t.plateau_window}, min_delta={t.plateau_delta}"
+        )
 
     training_args = GRPOConfig(
         temperature=1.0,
-        learning_rate=learning_rate,
-        beta=beta,
-        weight_decay=0.001,
-        warmup_steps=warmup_steps,
+        learning_rate=t.learning_rate,
+        beta=t.beta,
+        weight_decay=t.weight_decay,
+        warmup_steps=t.warmup_steps,
         lr_scheduler_type="linear",
         optim="adamw_8bit",
         logging_steps=1,
-        per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=grad_accum,
-        num_generations=num_generations,
-        max_completion_length=max_completion_length,
-        max_steps=max_steps,
-        save_steps=save_steps,
-        report_to="none",
-        output_dir=str(output_dir),
+        per_device_train_batch_size=t.batch_size,
+        gradient_accumulation_steps=t.grad_accum,
+        num_generations=t.num_generations,
+        max_completion_length=t.max_completion_length,
+        max_steps=t.max_steps,
+        save_steps=t.save_steps,
+        report_to=report_to,
+        output_dir=str(t.output_dir),
         epsilon=0.2,
         epsilon_high=0.28,
         delta=1.5,
         loss_type="bnpo",
         mask_truncated_completions=True,
-        seed=seed,
+        seed=t.seed,
+        run_name=settings.wandb.run_name,
     )
 
     trainer = GRPOTrainer(
@@ -367,15 +425,14 @@ def train(
     )
     trainer.train()
 
-    save_path.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(save_path))
-    tokenizer.save_pretrained(str(save_path))
-    _verify_adapter_nonzero(save_path)
-    typer.echo(f"Saved LoRA adapter to {save_path}")
+    t.save_path.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(str(t.save_path))
+    tokenizer.save_pretrained(str(t.save_path))
+    _verify_adapter_nonzero(t.save_path)
+    typer.echo(f"Saved LoRA adapter to {t.save_path}")
 
 
 def _verify_adapter_nonzero(save_path: Path) -> None:
-    from safetensors import safe_open
 
     adapter_file = save_path / "adapter_model.safetensors"
     if not adapter_file.exists():
@@ -413,11 +470,6 @@ def infer(
     """Generate one fresh DDExplainerPromptInput and roll the model out on it."""
     _setup_workspace_env()
 
-    from dd_explainer_data_generator import (
-        Trigger, detect_triggers, generate_dd_example, build_chat_messages,
-    )
-    from dd_explainer_rewards import parse_response
-    from transformers import TextStreamer
 
     model, tokenizer = _load_model(model_name, max_seq_length, lora_rank, lora_path=lora_path)
 
@@ -484,11 +536,6 @@ def regress(
     """Re-score the model against LangSmith's previously-failed traces."""
     _setup_workspace_env()
 
-    import pandas as pd
-    import torch
-
-    from dd_explainer_data_generator import build_chat_messages, detect_triggers
-    from dd_explainer_rewards import score_completion
 
     model, tokenizer = _load_model(model_name, max_seq_length, lora_rank, lora_path=lora_path)
 

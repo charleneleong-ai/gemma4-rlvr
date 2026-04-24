@@ -1,0 +1,15 @@
+# Longer training run with early stopping armed.
+
+defaults:
+  - train
+  - _self_
+
+train:
+  max_steps: 600
+  warmup_steps: 60
+  patience: 30
+  plateau_window: 20
+  plateau_delta: 0.05
+
+wandb:
+  tags: ["gemma4", "rlvr", "dd-explainer", "e4b", "long"]
