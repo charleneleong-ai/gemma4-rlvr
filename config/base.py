@@ -29,19 +29,20 @@ class WandbSettings(BaseModel):
     def enabled(self) -> bool:
         return self.mode != "disabled" and bool(self.project)
 
-    def apply_env(self) -> None:
-        """Re-export to os.environ so the transformers/trl wandb callback picks them up."""
-        if not self.enabled:
-            os.environ["WANDB_MODE"] = "disabled"
-            return
-        os.environ["WANDB_PROJECT"] = self.project
-        if self.entity:
-            os.environ["WANDB_ENTITY"] = self.entity
-        if self.run_name:
-            os.environ["WANDB_NAME"] = self.run_name
-        if self.run_id:
-            os.environ["WANDB_RUN_ID"] = self.run_id
-        os.environ["WANDB_MODE"] = self.mode
+    def init_kwargs(self) -> dict:
+        """Kwargs for `wandb.init()`. We init wandb ourselves (rather than letting
+        HF's WandbCallback do it from env vars) so notes/tags/run_id/run_name —
+        which `TrainingArguments` has no field for — flow straight from Hydra.
+        """
+        return {
+            "project": self.project,
+            "entity": self.entity,
+            "name": self.run_name,
+            "id": self.run_id,
+            "mode": self.mode,
+            "notes": self.notes,
+            "tags": self.tags or None,
+        }
 
 
 class TrainSettings(BaseModel):
@@ -65,6 +66,15 @@ class TrainSettings(BaseModel):
 
     lora_rank: int = 64
 
+    # --- Memory-efficient knobs ---------------------------------------
+    # Quantize the base model to 4-bit on load (LoRA adapters stay in
+    # bf16). Drops the 8B base from ~16 GB to ~4-5 GB of VRAM/host RAM
+    # so the GRPO rollout buffer + reference-policy copy can breathe.
+    load_in_4bit: bool = True
+    # "unsloth" = Unsloth's offloaded gradient checkpointing (recommended).
+    # Accepts "unsloth", "true", or "false" — coerced inside _load_model.
+    use_gradient_checkpointing: str = "unsloth"
+
     max_steps: int = 300
     warmup_steps: int = 30
     save_steps: int = 50
@@ -74,6 +84,17 @@ class TrainSettings(BaseModel):
     patience: int = 0
     plateau_window: int = 10
     plateau_delta: float = 0.05
+
+    # Post-train evaluation. Both run after a successful train pass and
+    # write into results.jsonl `metrics`. Set to 0 to skip either eval.
+    # heldout: random sample from the dataset (excluded from training).
+    # regression: known-failed LangSmith traces from .error_analysis_cache/.
+    eval_heldout_n: int = 1000      # ~18% of 5500-row dataset → ±1.6% std err on pass-rate
+    eval_regression_n: int = 100    # ~54% of 187 failed-trace cache
+    eval_batch_size: int = 8        # batched temp=0 generation on A100
+    eval_trace_dir: Path = Path(
+        "/workspace/gemma4_rl/.error_analysis_cache/20260413T075447Z_20260420T075447Z"
+    )
 
 
 class Settings(BaseModel):

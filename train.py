@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import signal
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -33,6 +34,14 @@ def _setup_workspace_env(workspace: Path = Path("/workspace/gemma4_rl")) -> None
     os.environ.setdefault("TORCH_HOME", str(workspace / "torch_cache"))
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
     os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(workspace / "torch_cache/inductor"))
+    # Reduce CUDA allocator fragmentation during long-context GRPO rollouts.
+    # `expandable_segments` lets the caching allocator grow/shrink mappings
+    # in-place, which is crucial when completion length spikes blow up the
+    # peak working set on a 40 GB A100.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    # Avoid HF tokenizers spawning extra threads (which double host-RAM
+    # footprint when the dataloader forks).
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 # Apply env + import unsloth at module load so its patches land BEFORE any
@@ -50,6 +59,7 @@ import unsloth  # noqa: E402, F401
 import typer  # noqa: E402
 import torch  # noqa: E402, F401
 import pandas as pd  # noqa: E402
+import wandb  # noqa: E402
 from datasets import Dataset  # noqa: E402
 from safetensors import safe_open  # noqa: E402
 from transformers import TextStreamer, TrainerCallback  # noqa: E402
@@ -69,6 +79,8 @@ from dd_explainer_rewards import (  # noqa: E402
     parse_response,
     score_completion,
 )
+import time  # noqa: E402
+from experiments.experiment_progress import log_experiment, plot_progress  # noqa: E402
 
 app = typer.Typer(
     help="RLVR / GRPO training for the direct_debit_explainer mock.",
@@ -145,7 +157,6 @@ class WandbMetricDefsCallback(TrainerCallback):
         self._min_comp_length: int | None = None
 
     def on_train_begin(self, args, state, control, **kwargs):
-        import wandb
         if wandb.run is None:
             return
         # `define_metric` only accepts *suffix* wildcards, not interior ones.
@@ -166,7 +177,6 @@ class WandbMetricDefsCallback(TrainerCallback):
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not logs:
             return
-        import wandb
         if wandb.run is None:
             return
 
@@ -219,6 +229,8 @@ def _load_model(
     max_seq_length: int,
     lora_rank: int,
     lora_path: Optional[Path] = None,
+    load_in_4bit: bool = True,
+    use_gradient_checkpointing: "bool | str" = "unsloth",
 ):
     """Load Gemma 4 via Unsloth.
 
@@ -226,12 +238,28 @@ def _load_model(
     - Otherwise load `model_name` and attach a fresh LoRA (for training).
     """
 
+    # Coerce string forms ("true"/"false"/"unsloth") into the values Unsloth expects.
+    gc = use_gradient_checkpointing
+    if isinstance(gc, str):
+        gc_norm = gc.strip().lower()
+        if gc_norm in ("true", "1", "yes"):
+            gc = True
+        elif gc_norm in ("false", "0", "no", ""):
+            gc = False
+        else:
+            gc = gc_norm  # e.g. "unsloth" — Unsloth's offloaded variant.
+
+    typer.echo(
+        f"Memory-efficient load: load_in_4bit={load_in_4bit}, "
+        f"use_gradient_checkpointing={gc!r}"
+    )
+
     if lora_path is not None and Path(lora_path).exists():
         typer.echo(f"Loading saved model + LoRA adapter from {lora_path}")
         model, tokenizer = FastModel.from_pretrained(
             model_name=str(lora_path),
             max_seq_length=max_seq_length,
-            load_in_4bit=False,
+            load_in_4bit=load_in_4bit,
             full_finetuning=False,
         )
         return model, tokenizer
@@ -240,7 +268,7 @@ def _load_model(
     model, tokenizer = FastModel.from_pretrained(
         model_name=model_name,
         max_seq_length=max_seq_length,
-        load_in_4bit=False,
+        load_in_4bit=load_in_4bit,
         full_finetuning=False,
     )
     model = FastModel.get_peft_model(
@@ -253,17 +281,20 @@ def _load_model(
         lora_alpha=lora_rank * 2,
         lora_dropout=0,
         bias="none",
-        use_gradient_checkpointing=False,  # KV cache off is ~5-10× slower on Gemma 4
+        # "unsloth" = Unsloth's offloaded gradient checkpointing — saves ~30%
+        # activation VRAM at near-zero speed cost. Critical for 6k-seq GRPO
+        # rollouts on a 40 GB A100.
+        use_gradient_checkpointing=gc,
         random_state=3407,
     )
     return model, tokenizer
 
 
-def _load_dataset(data_dir: Path):
-    """Glob the newest `dd_dataset_*_*rows.jsonl` in `data_dir`; drop the __meta__
-    header row and row_index column. Raises if nothing found.
+def _load_dataset(data_dir: Path, heldout_n: int = 0, seed: int = 42):
+    """Load the newest `dd_dataset_*_*rows.jsonl`. If `heldout_n > 0`, return
+    `(train_ds, heldout_ds)` where heldout is `heldout_n` rows sampled with a
+    fixed seed and excluded from the train split. Otherwise return just `train_ds`.
     """
-
     jsonl_files = sorted(Path(data_dir).glob("dd_dataset_*_*rows.jsonl"))
     if not jsonl_files:
         raise FileNotFoundError(
@@ -277,7 +308,14 @@ def _load_dataset(data_dir: Path):
     if "row_index" in dataset.column_names:
         dataset = dataset.remove_columns("row_index")
     typer.echo(f"Loaded {len(dataset)} rows from {path.name}")
-    return dataset
+
+    if heldout_n <= 0:
+        return dataset
+    if heldout_n >= len(dataset):
+        raise ValueError(f"heldout_n ({heldout_n}) >= dataset size ({len(dataset)})")
+    split = dataset.train_test_split(test_size=heldout_n, seed=seed)
+    typer.echo(f"Held-out split: {len(split['train'])} train + {len(split['test'])} eval (seed={seed})")
+    return split["train"], split["test"]
 
 
 # =============================================================================
@@ -407,6 +445,16 @@ def train(
     learning_rate: Optional[float] = typer.Option(None),
     beta: Optional[float] = typer.Option(None),
     lora_rank: Optional[int] = typer.Option(None),
+    load_in_4bit: Optional[bool] = typer.Option(
+        None,
+        "--load-in-4bit/--no-load-in-4bit",
+        help="Quantize base model to 4-bit on load (saves ~12 GB of host/GPU RAM).",
+    ),
+    use_gradient_checkpointing: Optional[str] = typer.Option(
+        None,
+        help="Gradient checkpointing mode: \"unsloth\" (offloaded, recommended), "
+             "\"true\", or \"false\".",
+    ),
     max_steps: Optional[int] = typer.Option(None),
     warmup_steps: Optional[int] = typer.Option(None),
     save_steps: Optional[int] = typer.Option(None),
@@ -433,6 +481,8 @@ def train(
         "max_completion_length": max_completion_length, "batch_size": batch_size,
         "grad_accum": grad_accum, "num_generations": num_generations,
         "learning_rate": learning_rate, "beta": beta, "lora_rank": lora_rank,
+        "load_in_4bit": load_in_4bit,
+        "use_gradient_checkpointing": use_gradient_checkpointing,
         "max_steps": max_steps, "warmup_steps": warmup_steps, "save_steps": save_steps,
         "seed": seed, "patience": patience, "plateau_window": plateau_window,
         "plateau_delta": plateau_delta,
@@ -458,13 +508,25 @@ def train(
     typer.echo(settings.model_dump_json(indent=2))
     typer.echo("===")
 
-    # 3. Wire wandb via env vars before trl/transformers spin up its callback.
-    settings.wandb.apply_env()
+    # 3. Init wandb from Hydra settings (notes/tags/run_id/run_name have no
+    # TrainingArguments field, so we init the run ourselves and let HF's
+    # WandbCallback attach to it). report_to drives whether the callback runs.
+    if settings.wandb.enabled:
+        wandb.init(**settings.wandb.init_kwargs(), config=settings.model_dump(mode="json"))
     report_to = "wandb" if settings.wandb.enabled else "none"
 
-
-    model, tokenizer = _load_model(t.model_name, t.max_seq_length, t.lora_rank)
-    dataset = _load_dataset(t.data_dir)
+    model, tokenizer = _load_model(
+        t.model_name,
+        t.max_seq_length,
+        t.lora_rank,
+        load_in_4bit=t.load_in_4bit,
+        use_gradient_checkpointing=t.use_gradient_checkpointing,
+    )
+    if t.eval_heldout_n > 0:
+        dataset, heldout_ds = _load_dataset(t.data_dir, heldout_n=t.eval_heldout_n, seed=t.seed)
+    else:
+        dataset = _load_dataset(t.data_dir)
+        heldout_ds = None
 
     callbacks = []
     if t.patience > 0:
@@ -499,7 +561,21 @@ def train(
         epsilon_high=0.28,
         delta=1.5,
         loss_type="bnpo",
+        # Drop overlong rollouts from the loss so a single 1024-token
+        # blowup can't dominate the gradient (and ties in nicely with the
+        # completion-length spikes we saw before the previous OOM kill).
         mask_truncated_completions=True,
+        # --- Memory-efficient training -------------------------------
+        # Even with Unsloth's offloaded checkpointing on the LoRA wrapper,
+        # forcing TRL to use checkpointing for the policy forward pass is
+        # the belt-and-braces way to cap activation memory.
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        # The dataset is small + tokenization is cheap; extra workers just
+        # multiply host-RAM usage and increase OOM risk in containers with
+        # tight cgroup limits.
+        dataloader_num_workers=0,
+        dataloader_pin_memory=False,
         seed=t.seed,
         run_name=settings.wandb.run_name,
     )
@@ -512,13 +588,239 @@ def train(
         train_dataset=dataset,
         callbacks=callbacks,
     )
-    trainer.train()
+    # Trap SIGTERM/SIGINT so an external `kill <pid>` still runs the finally
+    # block and the run gets logged to experiments/ instead of vanishing.
+    def _signal_to_exit(signum, _frame):
+        raise KeyboardInterrupt(f"received signal {signum}")
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, _signal_to_exit)
+
+    started = time.monotonic()
+    train_status = "RUNNING"
+    crash_reason: str | None = None
+    eval_metrics: dict = {}
+    try:
+        trainer.train()
+        completed = int(getattr(trainer.state, "global_step", 0) or 0)
+        train_status = "EARLY_STOPPED" if completed < t.max_steps else "COMPLETED"
+        # Post-train evals (only on successful completion — skip on CRASH).
+        # Run before autolog so the metrics land in results.jsonl in one row.
+        if t.eval_heldout_n > 0 and heldout_ds is not None:
+            eval_metrics["heldout"] = _run_heldout(
+                model, tokenizer, heldout_ds, t.max_completion_length, t.eval_batch_size,
+            )
+        if t.eval_regression_n > 0:
+            eval_metrics["regression"] = _run_regression(
+                model, tokenizer, t.eval_trace_dir, t.eval_regression_n,
+                t.max_completion_length, t.max_seq_length, t.eval_batch_size,
+            )
+    except BaseException as e:
+        train_status = "CRASH"
+        # Capture exception type + first line of message for the chart hover.
+        # KeyboardInterrupt → external SIGINT/SIGTERM (autoresearch triage or
+        # user kill); everything else is a real crash (OOM, assertion, etc).
+        first_line = str(e).strip().splitlines()[0] if str(e).strip() else ""
+        if isinstance(e, KeyboardInterrupt):
+            crash_reason = f"interrupted: {first_line or 'SIGINT/SIGTERM'}"
+        else:
+            crash_reason = f"{type(e).__name__}: {first_line[:120]}" if first_line else type(e).__name__
+        raise
+    finally:
+        runtime_min = (time.monotonic() - started) / 60.0
+        if settings.wandb.enabled and wandb.run is not None:
+            _autolog_experiment(settings, config_name, trainer, runtime_min, train_status,
+                                eval_metrics=eval_metrics, crash_reason=crash_reason)
 
     t.save_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(t.save_path))
     tokenizer.save_pretrained(str(t.save_path))
     _verify_adapter_nonzero(t.save_path)
     typer.echo(f"Saved LoRA adapter to {t.save_path}")
+
+
+def _autolog_experiment(settings, config_name: str, trainer, runtime_min: float,
+                        train_status: str, eval_metrics: dict | None = None,
+                        crash_reason: str | None = None) -> None:
+    """Append a row to experiments/<task>/results.jsonl + refresh the plot.
+
+    Pulls best-reward / final-kl from `wandb.run.summary` (populated by the
+    WandbMetricDefsCallback). On CRASH, status is logged as CRASH; otherwise
+    BASELINE (first run) / KEEP (best so far) / DISCARD is decided by
+    `experiment_progress.log_experiment`.
+    """
+    summary = dict(wandb.run.summary) if wandb.run.summary else {}
+    best_reward = summary.get("train/summary/best_reward") or summary.get("train/reward") or 0.0
+    metrics = {
+        "best_reward": float(best_reward),
+        "final_kl": summary.get("train/summary/current_kl"),
+        "final_loss": summary.get("train/summary/current_loss"),
+        "min_completion_length": summary.get("train/summary/min_completion_length"),
+        "train_status": train_status,
+    }
+    metrics = {k: v for k, v in metrics.items() if v is not None}
+    if eval_metrics:
+        for k, v in eval_metrics.items():
+            if v and v.get("n", 0) > 0:
+                metrics[k] = v
+    if crash_reason:
+        metrics["crash_reason"] = crash_reason
+
+    # CRASH gets a hard status; everything else (including EARLY_STOPPED) goes
+    # through the auto BASELINE/KEEP/DISCARD scoring so partial runs still get
+    # judged on whatever best_reward they achieved.
+    forced_status = "CRASH" if train_status == "CRASH" else None
+    desc_tag = f"[{train_status.lower()}] " if train_status in ("CRASH", "EARLY_STOPPED") else ""
+
+    log_experiment(
+        score=float(best_reward),
+        description=f"{desc_tag}config={config_name}; {settings.wandb.notes or '(no notes)'}",
+        config_name=config_name,
+        steps=int(getattr(trainer.state, "global_step", 0) or 0),
+        runtime_min=runtime_min,
+        status=forced_status,
+        metrics=metrics,
+        notes=settings.wandb.notes or "",
+        wandb_url=wandb.run.get_url() or "",
+        wandb_run_id=wandb.run.id,
+        wandb_run_name=wandb.run.name or "",
+    )
+    plot_progress()
+
+
+# =============================================================================
+# Post-train evaluation helpers (held-out + regression)
+# =============================================================================
+#
+# Both eval modes generate at temperature=0 (deterministic) and score with the
+# same 7 reward functions used during training. Outputs aggregate dicts that
+# get nested under `metrics["heldout"]` / `metrics["regression"]` in
+# results.jsonl so the chart can surface them alongside the train reward.
+
+# Per-component max scores — used to compute "pass" (= component at its max)
+_REWARD_MAX = {
+    "schema_valid":          1.0,
+    "in_enum":               1.0,
+    "f1_triggers":          10.0,
+    "prev_amount_correct":   2.0,
+    "no_hallucinated_facts": 1.0,
+    "underpayment_ok":       0.5,
+    "well_formed":           0.5,
+}
+_REWARD_TOTAL_MAX = sum(_REWARD_MAX.values())  # 16.0
+
+
+@torch.no_grad()
+def _generate_batch(model, tokenizer, pins, max_completion_length: int) -> list[str]:
+    """Batched temp=0 generation. ~5-8x throughput vs single-row on A100."""
+    if not pins:
+        return []
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    texts = [
+        tokenizer.apply_chat_template(
+            build_chat_messages(pin), tokenize=False, add_generation_prompt=True,
+        )
+        for pin in pins
+    ]
+    enc = tokenizer(
+        texts, add_special_tokens=False, return_tensors="pt",
+        padding=True, padding_side="left",  # left-pad so generated tokens align
+    ).to("cuda")
+    out = model.generate(
+        **enc, max_new_tokens=max_completion_length,
+        temperature=0.0, do_sample=False, use_cache=True,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+    prompt_len = enc["input_ids"].shape[1]
+    return [tokenizer.decode(seq[prompt_len:], skip_special_tokens=True) for seq in out]
+
+
+def _aggregate_scores(rows: list[dict]) -> dict:
+    """Turn per-row score dicts into pass-rate / mean aggregate."""
+    if not rows:
+        return {"n": 0}
+    n = len(rows)
+    out: dict = {"n": n}
+    pass_all = 0
+    for row in rows:
+        if all(row.get(k, 0.0) >= mx - 1e-6 for k, mx in _REWARD_MAX.items()):
+            pass_all += 1
+    out["pass_all"] = pass_all
+    out["pass_all_pct"] = round(100 * pass_all / n, 1)
+    # Per-component pass rate + mean
+    for k, mx in _REWARD_MAX.items():
+        vals = [row.get(k, 0.0) for row in rows]
+        out[f"{k}_pass"] = sum(1 for v in vals if v >= mx - 1e-6)
+        out[f"{k}_mean"] = round(sum(vals) / n, 3)
+    out["mean_total"] = round(sum(sum(row.get(k, 0.0) for k in _REWARD_MAX) for row in rows) / n, 3)
+    return out
+
+
+def _score_pins(model, tokenizer, pins, max_completion_length: int,
+                batch_size: int, label: str) -> list[dict]:
+    """Generate completions for `pins` in batches and score each on all 7 rewards."""
+    rows: list[dict] = []
+    n = len(pins)
+    for start in range(0, n, batch_size):
+        chunk = pins[start:start + batch_size]
+        try:
+            completions = _generate_batch(model, tokenizer, chunk, max_completion_length)
+        except Exception as e:
+            typer.echo(f"[{label}] batch starting at {start} skipped: {e}")
+            continue
+        for pin, completion in zip(chunk, completions):
+            try:
+                gt = sorted(t.value for t in detect_triggers(pin))
+                inp = pin if isinstance(pin, dict) else pin.model_dump(mode="json")
+                rows.append(score_completion(completion, gt, inp))
+            except Exception as e:
+                typer.echo(f"[{label}] scoring failed: {e}")
+        done = min(start + batch_size, n)
+        if done % (batch_size * 4) == 0 or done == n:
+            typer.echo(f"[{label}] {done}/{n} done")
+    return rows
+
+
+def _run_heldout(model, tokenizer, heldout_ds, max_completion_length: int,
+                 batch_size: int) -> dict:
+    """Score on a held-out IID sample of the synthetic dataset (generalization)."""
+    if heldout_ds is None or len(heldout_ds) == 0:
+        return {"n": 0}
+    pins = [item.get("pin") or item for item in heldout_ds]
+    typer.echo(f"[eval/heldout] scoring {len(pins)} rows (temp=0, batch={batch_size})…")
+    rows = _score_pins(model, tokenizer, pins, max_completion_length, batch_size, "eval/heldout")
+    agg = _aggregate_scores(rows)
+    typer.echo(f"[eval/heldout] pass_all={agg.get('pass_all',0)}/{agg.get('n',0)} "
+               f"({agg.get('pass_all_pct',0)}%) mean={agg.get('mean_total',0)}")
+    return agg
+
+
+def _run_regression(model, tokenizer, trace_dir: Path, n_rows: int,
+                    max_completion_length: int, max_seq_length: int,
+                    batch_size: int) -> dict:
+    """Score on previously-failed LangSmith production traces (regression gate)."""
+    traces_path = trace_dir / "traces.parquet"
+    if not traces_path.exists():
+        typer.echo(f"[eval/regression] {traces_path} missing — skipped")
+        return {"n": 0}
+    df = pd.read_parquet(traces_path)
+    failed = df[df["feedback.direct_debit_faithfulness"] < 1.0]
+    budget = max_seq_length - max_completion_length - 64
+    candidates = []
+    for _, row in failed.iterrows():
+        pin = reconstruct_pin_from_trace(row)
+        if pin is None:
+            continue
+        if prompt_token_length(tokenizer, pin) <= budget:
+            candidates.append(pin)
+    candidates = candidates[:n_rows]
+    typer.echo(f"[eval/regression] scoring {len(candidates)} prior-failed traces "
+               f"(temp=0, batch={batch_size})…")
+    rows = _score_pins(model, tokenizer, candidates, max_completion_length, batch_size, "eval/regression")
+    agg = _aggregate_scores(rows)
+    typer.echo(f"[eval/regression] pass_all={agg.get('pass_all',0)}/{agg.get('n',0)} "
+               f"({agg.get('pass_all_pct',0)}%) mean={agg.get('mean_total',0)}")
+    return agg
 
 
 def _verify_adapter_nonzero(save_path: Path) -> None:
@@ -625,47 +927,12 @@ def regress(
     """Re-score the model against LangSmith's previously-failed traces."""
     _setup_workspace_env()
 
-
     model, tokenizer = _load_model(model_name, max_seq_length, lora_rank, lora_path=lora_path)
-
-    df = pd.read_parquet(trace_dir / "traces.parquet")
-    failed = df[df["feedback.direct_debit_faithfulness"] < 1.0]
-    typer.echo(f"Loaded {len(failed)} previously-failed prompts from {trace_dir.name}")
-
-    budget = max_seq_length - max_completion_length - 64
-    candidates = []
-    for _, row in failed.iterrows():
-        pin = reconstruct_pin_from_trace(row)
-        if pin is None:
-            continue
-        if prompt_token_length(tokenizer, pin) <= budget:
-            candidates.append(pin)
-    typer.echo(f"Candidates after token-budget filter: {len(candidates)} / {len(failed)}")
-
-    @torch.no_grad()
-    def _generate(pin) -> str:
-        text = tokenizer.apply_chat_template(
-            build_chat_messages(pin), tokenize=False, add_generation_prompt=True,
-        )
-        inputs = tokenizer(text=text, add_special_tokens=False, return_tensors="pt").to("cuda")
-        out = model.generate(
-            **inputs,
-            max_new_tokens=max_completion_length,
-            temperature=0.0,
-            do_sample=False,
-            use_cache=True,
-        )
-        return tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-
-    rows_out = []
-    for pin in candidates[:n_rows]:
-        completion = _generate(pin)
-        gt = sorted(t.value for t in detect_triggers(pin))
-        rows_out.append(score_completion(completion, gt, pin.model_dump(mode="json")))
-
-    regression_df = pd.DataFrame(rows_out)
-    typer.echo(f"\nScored {len(regression_df)} rows. Mean reward by category:")
-    typer.echo(regression_df.mean(numeric_only=True).round(3).to_string())
+    agg = _run_regression(
+        model, tokenizer, trace_dir, n_rows,
+        max_completion_length, max_seq_length, batch_size=8,
+    )
+    typer.echo(f"\nAggregate: {json.dumps(agg, indent=2)}")
 
 
 if __name__ == "__main__":
