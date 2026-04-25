@@ -561,9 +561,8 @@ def train(
         epsilon_high=0.28,
         delta=1.5,
         loss_type="bnpo",
-        # Drop overlong rollouts from the loss so a single 1024-token
-        # blowup can't dominate the gradient (and ties in nicely with the
-        # completion-length spikes we saw before the previous OOM kill).
+        # Drop overlong rollouts from the loss so one 1024-token blowup
+        # can't dominate the gradient.
         mask_truncated_completions=True,
         # --- Memory-efficient training -------------------------------
         # Even with Unsloth's offloaded checkpointing on the LoRA wrapper,
@@ -616,9 +615,8 @@ def train(
             )
     except BaseException as e:
         train_status = "CRASH"
-        # Capture exception type + first line of message for the chart hover.
-        # KeyboardInterrupt → external SIGINT/SIGTERM (autoresearch triage or
-        # user kill); everything else is a real crash (OOM, assertion, etc).
+        # KeyboardInterrupt → external SIGINT/SIGTERM; anything else is a
+        # real crash (OOM, assertion, etc).
         first_line = str(e).strip().splitlines()[0] if str(e).strip() else ""
         if isinstance(e, KeyboardInterrupt):
             crash_reason = f"interrupted: {first_line or 'SIGINT/SIGTERM'}"

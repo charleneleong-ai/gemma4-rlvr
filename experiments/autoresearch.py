@@ -45,14 +45,8 @@ PYTHON = ROOT / ".venv" / "bin" / "python"
 TRAIN = ROOT / "train.py"
 RESULTS = ROOT / "experiments" / "dd_explainer" / "results.jsonl"
 CURRENT = ROOT / "experiments" / "dd_explainer" / "current_run.json"
-LOG_PATH_ENV = "AUTORESEARCH_LOG_PATH"  # set by detached launch wrapper
+LOG_PATH_ENV = "AUTORESEARCH_LOG_PATH"
 
-# Order matters: each entry tests one axis vs the lr=5e-6 anchor.
-#
-# Sweep #1 finding (results.jsonl E2-E7): only lr=5e-6 stays under |kl|=1.0.
-# Default lr=1e-5 diverges (kl=3.335), 2x diverges harder (kl=15.21),
-# beta variants on the default LR also diverge — beta only changes how fast.
-# Sweep #2 anchors on the working LR and varies everything else.
 SCHEDULE: list[tuple[str, list[str], str]] = [
     ("train_fast", ["--learning-rate", "5.0e-6"],
      "anchor (lr=5e-6 — replicate E4 with eval gate enabled)"),
@@ -125,11 +119,11 @@ def _crash_reason_from_lines(lines: list[str]) -> str:
 
 
 def _patch_last_with_crash_reason(crash_reason: str) -> None:
-    """Add crash_reason to the latest results.jsonl row's metrics.
+    """Add `crash_reason` to the latest results.jsonl row's metrics.
 
-    Used when autoresearch detects a non-zero child exit with no triage
+    Called when autoresearch detects a non-zero child exit with no triage
     kill_reason — the row was already written by train.py's finally hook
-    with status=CRASH but no crash_reason (older train.py code path).
+    with status=CRASH but no detected cause.
     """
     if not RESULTS.exists():
         return
@@ -151,11 +145,10 @@ def _patch_last_with_crash_reason(crash_reason: str) -> None:
 def _relabel_last_as_early_kill(kill_reason: str) -> None:
     """Rewrite the last results.jsonl row from CRASH→EARLY_KILL.
 
-    The child's finally hook unconditionally writes CRASH because it only
-    sees the KeyboardInterrupt — it can't tell if SIGINT came from a real
-    failure or from autoresearch's deliberate triage. autoresearch knows,
-    so we patch the row here to colour triaged kills (grey) separately
-    from true crashes (red) on the progress chart.
+    train.py's finally hook can't distinguish a triage SIGINT from a real
+    crash — it always logs CRASH. Only autoresearch knows the kill was
+    deliberate, so we patch the row here so the chart can colour triaged
+    kills (grey) separately from true crashes (red).
     """
     if not RESULTS.exists():
         return
@@ -231,8 +224,6 @@ def _run_with_triage(cmd: list[str], baseline_score: float) -> tuple[int, str | 
 
     step_times: deque[float] = deque(maxlen=SLOW_WINDOW)
     recent_rewards: deque[float] = deque(maxlen=NO_LEARN_WINDOW)
-    # Tail buffer for crash-cause scanning when the child exits non-zero
-    # without a triage trigger (real OOM / exception / SIGKILL).
     recent_lines: deque[str] = deque(maxlen=200)
     n_steps = 0
     kill_reason: str | None = None
@@ -302,9 +293,6 @@ def _run_with_triage(cmd: list[str], baseline_score: float) -> tuple[int, str | 
         proc.wait()
         raise
 
-    # Real crash detection: child exited non-zero AND no triage fired.
-    # Scan the tail of stdout for the cause (OOM / *Error: / etc) and tag
-    # the row train.py just wrote so the chart shows WHY it crashed.
     crash_reason: str | None = None
     if kill_reason is None and proc.returncode not in (0, None):
         crash_reason = _crash_reason_from_lines(list(recent_lines))
@@ -348,9 +336,7 @@ def main(
         print(f"  baseline_score so far = {baseline if baseline != float('-inf') else 'none'}")
         print(f"$ {' '.join(cmd)}\n{'='*70}")
 
-        # Sidecar so plot_progress can render the in-flight iter as a yellow
-        # RUNNING diamond. log_path is sourced from $AUTORESEARCH_LOG_PATH set
-        # by the detached launch wrapper, falling back to newest log file.
+        # Sidecar lets plot_progress render the in-flight iter.
         log_path = os.environ.get(LOG_PATH_ENV, "")
         if not log_path:
             logs = sorted((ROOT / "logs").glob("autoresearch_*.log"))

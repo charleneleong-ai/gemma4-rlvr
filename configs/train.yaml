@@ -13,10 +13,10 @@ train:
   output_dir: outputs
 
   max_seq_length: 6144
-  max_completion_length: 768       # was 1024 — long-tail rollouts caused OOM peaks
+  max_completion_length: 768       # cap long-tail rollouts that cause OOM peaks
 
-  batch_size: 4                    # was 8 — halve rollout batch to fit cgroup
-  grad_accum: 2                    # keep effective batch = 8
+  batch_size: 4                    # rollout batch sized for 40 GB A100 cgroup
+  grad_accum: 2                    # effective grad-update batch = 8
   num_generations: 4
 
   learning_rate: 1.0e-5

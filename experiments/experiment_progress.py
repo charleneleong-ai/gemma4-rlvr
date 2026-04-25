@@ -26,18 +26,16 @@ import plotly.graph_objects as go
 import typer
 from plotly.subplots import make_subplots
 
-# Sibling module — works both when the file is run directly
-# (`python experiments/experiment_progress.py`) and when imported as a
-# package member from train.py.
+# Sibling import that works both as direct script and as package member.
 try:
     from experiments._chart_widgets import plotly_label_toggle
 except ImportError:
     from _chart_widgets import plotly_label_toggle
 
+import re
+
 EXPERIMENTS_DIR = Path(__file__).parent
 DEFAULT_TASK = "dd_explainer"
-
-import re
 
 _REWARD_RE = re.compile(r"'reward': '([\-0-9.eE+]+)'")
 _STEP_RE = re.compile(r"'step_time': '([\-0-9.eE+]+)'")
@@ -69,8 +67,6 @@ def _scrape_in_flight_run(task: str) -> dict | None:
         cur = json.loads(cur_f.read_text())
     except json.JSONDecodeError:
         return None
-    # Stale-sentinel guard: if the latest finished row has a >= experiment id,
-    # the sidecar wasn't cleaned up (autoresearch crashed mid-iter). Drop it.
     finished = load_results(task)
     if finished and finished[-1]["experiment"] >= cur["experiment"]:
         return None
@@ -79,7 +75,6 @@ def _scrape_in_flight_run(task: str) -> dict | None:
     if not log_path.exists():
         return None
 
-    # Scan log from the most recent iter_marker boundary onward.
     text = log_path.read_text(errors="replace")
     if iter_marker:
         idx = text.rfind(iter_marker)
@@ -88,8 +83,6 @@ def _scrape_in_flight_run(task: str) -> dict | None:
     rewards = [float(m) for m in _REWARD_RE.findall(text)]
     steps = len(_STEP_RE.findall(text))
     best = max(rewards) if rewards else 0.0
-    # Last `wandb: 🚀 View run at https://wandb.ai/...` URL inside this iter
-    # boundary is the in-flight run.
     urls = _WANDB_URL_RE.findall(text)
     wandb_url = cur.get("wandb_url") or (urls[-1] if urls else "")
 
@@ -276,7 +269,6 @@ def _label(r: dict, is_best: bool = False) -> str:
         bits.append(f"kl={m['final_kl']:.2f}")
     if r.get("steps"):
         bits.append(f"{r['steps']}st")
-    # Eval pass-rates (compact form)
     ho = (m.get("heldout") or {})
     if ho.get("n"):
         bits.append(f"ho={ho['pass_all']}/{ho['n']}")

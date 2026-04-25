@@ -1,14 +1,8 @@
 # Memory-constrained training preset.
 #
-# Use when the previous run was OOM-killed at the cgroup/container level
-# (typical on 40 GB A100 Vast.ai instances with ≤ 64 GB host RAM cap).
-# Trades wall-clock for headroom:
-#   - shorter context window
-#   - half the rollout batch
-#   - 2 generations per prompt instead of 4
-#   - 4-bit base + Unsloth offloaded gradient checkpointing forced on
-# Effective grad-update batch = batch_size * grad_accum = 8.
-# Rollout footprint = batch_size * num_generations = 4 sequences (vs 16 default).
+# Use when the cgroup OOM-kills `train.yaml`. Trades wall-clock for headroom:
+# shorter context, half the rollout batch (4 seqs vs 16), 2 generations per
+# prompt instead of 4. Effective grad-update batch stays at 8.
 
 defaults:
   - train

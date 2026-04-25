@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch  # noqa: F401
 
 from experiment_progress import _STATUS_STYLE, _kill_tag, load_results
 
