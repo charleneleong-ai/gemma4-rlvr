@@ -1,4 +1,10 @@
 # Default training config — 300-step GRPO on E4B-it with wandb logging.
+#
+# Memory profile (40 GB A100 + container cgroup):
+#   - 4-bit base + Unsloth offloaded gradient checkpointing
+#   - per-step rollout = batch_size * num_generations = 16 sequences
+#   - peak completion = 768 tokens
+# Effective batch (for grad updates) = batch_size * grad_accum = 8.
 
 train:
   model_name: unsloth/gemma-4-E4B-it
@@ -7,10 +13,10 @@ train:
   output_dir: outputs
 
   max_seq_length: 6144
-  max_completion_length: 1024
+  max_completion_length: 768       # was 1024 — long-tail rollouts caused OOM peaks
 
-  batch_size: 8
-  grad_accum: 1
+  batch_size: 4                    # was 8 — halve rollout batch to fit cgroup
+  grad_accum: 2                    # keep effective batch = 8
   num_generations: 4
 
   learning_rate: 1.0e-5
@@ -18,6 +24,10 @@ train:
   weight_decay: 0.001
 
   lora_rank: 64
+
+  # Memory-efficient defaults (override via CLI or train_mem.yaml).
+  load_in_4bit: true
+  use_gradient_checkpointing: unsloth
 
   max_steps: 300
   warmup_steps: 30

@@ -1,0 +1,24 @@
+# Speed-tuned training preset.
+#
+# Compared to train.yaml: same effective batch (8) and rollout footprint
+# (bs=4 * num_gen=4 = 16) but with shorter contexts. Cuts the per-step
+# working set by ~33% so we keep the parallelism that train_mem.yaml gave
+# up (which dropped GPU util to ~33% and pushed step_time from 66s to 100s).
+#
+# Use this when your prompts comfortably fit in 4k tokens and your target
+# completions are <= 512 — true for the dd_explainer task.
+
+defaults:
+  - train
+  - _self_
+
+train:
+  max_seq_length: 4096        # was 6144; 99th-percentile prompt is ~3.5k
+  max_completion_length: 512  # was 768; reward-shaping caps useful length
+
+  batch_size: 4               # match train.yaml — keep GPU saturated
+  grad_accum: 2               # effective batch = 8
+  num_generations: 4          # GRPO needs ≥4 rollouts/prompt for variance
+
+wandb:
+  tags: ["gemma4", "rlvr", "dd-explainer", "e4b", "fast"]

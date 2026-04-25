@@ -1,0 +1,29 @@
+# Memory-constrained training preset.
+#
+# Use when the previous run was OOM-killed at the cgroup/container level
+# (typical on 40 GB A100 Vast.ai instances with ≤ 64 GB host RAM cap).
+# Trades wall-clock for headroom:
+#   - shorter context window
+#   - half the rollout batch
+#   - 2 generations per prompt instead of 4
+#   - 4-bit base + Unsloth offloaded gradient checkpointing forced on
+# Effective grad-update batch = batch_size * grad_accum = 8.
+# Rollout footprint = batch_size * num_generations = 4 sequences (vs 16 default).
+
+defaults:
+  - train
+  - _self_
+
+train:
+  max_seq_length: 4096
+  max_completion_length: 512
+
+  batch_size: 2
+  grad_accum: 4
+  num_generations: 2
+
+  load_in_4bit: true
+  use_gradient_checkpointing: unsloth
+
+wandb:
+  tags: ["gemma4", "rlvr", "dd-explainer", "e4b", "mem"]
