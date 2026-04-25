@@ -49,17 +49,15 @@ LOG_PATH_ENV = "AUTORESEARCH_LOG_PATH"
 
 SCHEDULE: list[tuple[str, list[str], str]] = [
     ("train_fast", ["--learning-rate", "5.0e-6"],
-     "anchor (lr=5e-6 — replicate E4 with eval gate enabled)"),
-    ("train_fast", ["--learning-rate", "5.0e-6", "--seed", "7"],
-     "different seed (lr=5e-6, seed=7 — measures noise floor)"),
+     "anchor (lr=5e-6 — eval-gate verification baseline)"),
     ("train_fast", ["--learning-rate", "5.0e-6", "--num-generations", "8"],
-     "8 rollouts per prompt (tighter advantage estimate)"),
-    ("train_fast", ["--learning-rate", "5.0e-6", "--lora-rank", "128"],
-     "bigger LoRA (rank=128 — more capacity)"),
-    ("train_fast", ["--learning-rate", "5.0e-6", "--patience", "12"],
-     "longer patience (12 logs — more training before plateau call)"),
-    ("train_fast", ["--learning-rate", "2.0e-6"],
-     "even smaller LR (lr=2e-6 — extra conservative)"),
+     "lr=5e-6 + num_generations=8 (tighter advantage estimate)"),
+    ("train_fast", ["--learning-rate", "5.0e-6", "--max-steps", "160"],
+     "lr=5e-6 + max_steps=160 (longer training budget)"),
+    ("train_fast", ["--learning-rate", "5.0e-6", "--warmup-steps", "60"],
+     "lr=5e-6 + warmup=60 (gentler initial ramp, default is 30)"),
+    ("train_fast", ["--learning-rate", "2.0e-6", "--max-steps", "160"],
+     "lr=2e-6 + max_steps=160 (small LR with longer training)"),
 ]
 
 COMMON_OVERRIDES = [
