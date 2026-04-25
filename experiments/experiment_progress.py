@@ -26,6 +26,14 @@ import plotly.graph_objects as go
 import typer
 from plotly.subplots import make_subplots
 
+# Sibling module — works both when the file is run directly
+# (`python experiments/experiment_progress.py`) and when imported as a
+# package member from train.py.
+try:
+    from experiments._chart_widgets import plotly_label_toggle
+except ImportError:
+    from _chart_widgets import plotly_label_toggle
+
 EXPERIMENTS_DIR = Path(__file__).parent
 DEFAULT_TASK = "dd_explainer"
 
@@ -303,6 +311,10 @@ def plot_progress(task: Optional[str] = None) -> Path:
         subtitles.append(f"{t} — {len(rs)} experiments, {n_kept} kept{f', {rt:.0f}min total' if rt else ''}")
 
     fig = make_subplots(rows=len(tasks), cols=1, subplot_titles=subtitles, vertical_spacing=0.22)
+    # Capture the count *before* we add per-row labels — these initial entries
+    # are subplot-title annotations and must NOT be toggled by the labels
+    # show/hide button below.
+    n_static_annotations = len(fig.layout.annotations)
 
     # Centered horizontally on the dot (xshift=0); alternate y across 4
     # levels so adjacent boxes don't overlap even though they share x.
@@ -332,11 +344,18 @@ def plot_progress(task: Optional[str] = None) -> Path:
             if is_best:
                 marker_kwargs.update(size=cfg["size"] + 6, line=dict(width=3, color="#27ae60"))
 
+            # Marker carries the same hover content as its label box, but
+            # `hoverinfo="skip"` keeps it dormant while labels are visible.
+            # The toggle button flips hoverinfo→"text" when labels go off so
+            # you can still hover the dots.
             fig.add_trace(go.Scatter(
                 x=[r["experiment"]], y=[r["score"]], mode="markers",
                 marker=marker_kwargs,
                 name=_LEGEND_NAMES[r["status"]], legendgroup=r["status"], showlegend=show_legend,
-                hoverinfo="skip",  # hover lives on the label box only
+                hovertext=[_hover(r)],
+                hovertemplate="%{hovertext}<extra></extra>",
+                hoverinfo="skip",
+                hoverlabel=dict(bgcolor="white", bordercolor=cfg["color"]),
             ), row=i, col=1)
 
             xanchor, ax, ay = POSITIONS[j % len(POSITIONS)]
@@ -397,7 +416,24 @@ def plot_progress(task: Optional[str] = None) -> Path:
         # (best-row callout is rendered inline above with green styling +
         # ↗ W&B link; no separate ★ annotation needed.)
 
+        # Dotted horizontal line at the BASELINE score (the first/only
+        # successful clean run). Anchors the eye to the bar future runs
+        # need to clear.
+        baseline_row = next(
+            (r for r in results if r["status"] == "BASELINE"), None,
+        )
+        if baseline_row:
+            fig.add_hline(
+                y=baseline_row["score"],
+                line=dict(color="#27ae60", width=1.5, dash="dot"),
+                annotation_text=f"baseline E{baseline_row['experiment']} = {baseline_row['score']:.2f}",
+                annotation_position="top right",
+                annotation_font=dict(color="#1a7a3a", size=10),
+                row=i, col=1,
+            )
+
         fig.update_yaxes(title_text="Train reward (higher is better)",
+                         rangemode="tozero",
                          gridcolor="#eee", zerolinecolor="#ddd", row=i, col=1)
         fig.update_xaxes(title_text="Experiment #", dtick=1,
                          gridcolor="#f4f4f4", row=i, col=1)
@@ -424,6 +460,13 @@ def plot_progress(task: Optional[str] = None) -> Path:
                 ann.font = dict(size=14, color="#333")
             ann.yshift = 24
 
+    # Real HTML switch (injected via post_script) — sits top-left of the
+    # chart, calls Plotly.relayout + Plotly.restyle directly. Toggling off
+    # hides every per-row annotation AND flips marker hoverinfo skip→text
+    # so the dots become hoverable with the same tooltip.
+    label_indices = list(range(n_static_annotations, len(fig.layout.annotations)))
+    n_traces = len(fig.data)
+
     fig.update_layout(
         title=dict(text="GRPO Experiment Progress",
                    font=dict(size=22, color="#222"),
@@ -443,7 +486,15 @@ def plot_progress(task: Optional[str] = None) -> Path:
 
     out_dir = _task_dir(tasks[0]) if len(tasks) == 1 else EXPERIMENTS_DIR
     html = out_dir / "progress.html"
-    fig.write_html(str(html))
+    fig.write_html(
+        str(html),
+        post_script=plotly_label_toggle(
+            label_indices=label_indices,
+            n_traces=n_traces,
+            label="labels",
+            position="top-left",
+        ),
+    )
     print(f"Saved {html}")
     try:
         png = out_dir / "progress.png"
