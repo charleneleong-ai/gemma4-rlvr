@@ -123,4 +123,5 @@ gemma_4_lora/
 experiments/*/results.jsonl
 experiments/*/progress.html
 experiments/*/progress.png
-experiments/*/current_run.jsonexperiments/*/eval_progress.html
+experiments/*/current_run.json
+experiments/*/eval_progress.html
