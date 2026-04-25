@@ -91,7 +91,9 @@ class TrainSettings(BaseModel):
     # regression: known-failed LangSmith traces from .error_analysis_cache/.
     eval_heldout_n: int = 1000      # ~18% of 5500-row dataset → ±1.6% std err on pass-rate
     eval_regression_n: int = 100    # ~54% of 187 failed-trace cache
-    eval_batch_size: int = 8        # batched temp=0 generation on A100
+    eval_batch_size: int = 32       # measured: bs=24 stable at 27.3/40 GB, 48% compute util
+                                    # (CPU-bound on apply_chat_template). bs=32 → ~32.6 GB,
+                                    # ~8 GB safety margin for variable-length completions.
     eval_trace_dir: Path = Path(
         "/workspace/gemma4_rl/.error_analysis_cache/20260413T075447Z_20260420T075447Z"
     )
