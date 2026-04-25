@@ -708,21 +708,19 @@ _REWARD_TOTAL_MAX = sum(_REWARD_MAX.values())  # 16.0
 
 
 @torch.no_grad()
-def _generate_batch(model, tokenizer, pins, max_completion_length: int) -> list[str]:
+def _generate_batch(model, tokenizer, messages_list, max_completion_length: int) -> list[str]:
     """Batched temp=0 generation. ~5-8x throughput vs single-row on A100."""
-    if not pins:
+    if not messages_list:
         return []
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     texts = [
-        tokenizer.apply_chat_template(
-            build_chat_messages(pin), tokenize=False, add_generation_prompt=True,
-        )
-        for pin in pins
+        tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+        for msgs in messages_list
     ]
     enc = tokenizer(
         texts, add_special_tokens=False, return_tensors="pt",
-        padding=True, padding_side="left",  # left-pad so generated tokens align
+        padding=True, padding_side="left",
     ).to("cuda")
     out = model.generate(
         **enc, max_new_tokens=max_completion_length,
@@ -754,22 +752,22 @@ def _aggregate_scores(rows: list[dict]) -> dict:
     return out
 
 
-def _score_pins(model, tokenizer, pins, max_completion_length: int,
-                batch_size: int, label: str) -> list[dict]:
-    """Generate completions for `pins` in batches and score each on all 7 rewards."""
+def _score_items(model, tokenizer, items, max_completion_length: int,
+                 batch_size: int, label: str) -> list[dict]:
+    """Score (messages, gt_triggers, input_json) tuples in batches."""
     rows: list[dict] = []
-    n = len(pins)
+    n = len(items)
     for start in range(0, n, batch_size):
-        chunk = pins[start:start + batch_size]
+        chunk = items[start:start + batch_size]
         try:
-            completions = _generate_batch(model, tokenizer, chunk, max_completion_length)
+            completions = _generate_batch(
+                model, tokenizer, [m for m, _, _ in chunk], max_completion_length,
+            )
         except Exception as e:
             typer.echo(f"[{label}] batch starting at {start} skipped: {e}")
             continue
-        for pin, completion in zip(chunk, completions):
+        for (_, gt, inp), completion in zip(chunk, completions):
             try:
-                gt = sorted(t.value for t in detect_triggers(pin))
-                inp = pin if isinstance(pin, dict) else pin.model_dump(mode="json")
                 rows.append(score_completion(completion, gt, inp))
             except Exception as e:
                 typer.echo(f"[{label}] scoring failed: {e}")
@@ -781,12 +779,19 @@ def _score_pins(model, tokenizer, pins, max_completion_length: int,
 
 def _run_heldout(model, tokenizer, heldout_ds, max_completion_length: int,
                  batch_size: int) -> dict:
-    """Score on a held-out IID sample of the synthetic dataset (generalization)."""
+    """Score on a held-out IID sample of the synthetic dataset (generalization).
+
+    Heldout rows are dicts with `prompt` (chat messages), `ground_truth_triggers`,
+    and `input_json` — straight from `dd_explainer_data_generator`.
+    """
     if heldout_ds is None or len(heldout_ds) == 0:
         return {"n": 0}
-    pins = [item.get("pin") or item for item in heldout_ds]
-    typer.echo(f"[eval/heldout] scoring {len(pins)} rows (temp=0, batch={batch_size})…")
-    rows = _score_pins(model, tokenizer, pins, max_completion_length, batch_size, "eval/heldout")
+    items = [
+        (row["prompt"], sorted(row["ground_truth_triggers"]), row["input_json"])
+        for row in heldout_ds
+    ]
+    typer.echo(f"[eval/heldout] scoring {len(items)} rows (temp=0, batch={batch_size})…")
+    rows = _score_items(model, tokenizer, items, max_completion_length, batch_size, "eval/heldout")
     agg = _aggregate_scores(rows)
     typer.echo(f"[eval/heldout] pass_all={agg.get('pass_all',0)}/{agg.get('n',0)} "
                f"({agg.get('pass_all_pct',0)}%) mean={agg.get('mean_total',0)}")
@@ -796,7 +801,11 @@ def _run_heldout(model, tokenizer, heldout_ds, max_completion_length: int,
 def _run_regression(model, tokenizer, trace_dir: Path, n_rows: int,
                     max_completion_length: int, max_seq_length: int,
                     batch_size: int) -> dict:
-    """Score on previously-failed LangSmith production traces (regression gate)."""
+    """Score on previously-failed LangSmith production traces (regression gate).
+
+    Reconstruct each prompt from the parquet via `reconstruct_pin_from_trace`
+    so we can rebuild chat messages with `build_chat_messages`.
+    """
     traces_path = trace_dir / "traces.parquet"
     if not traces_path.exists():
         typer.echo(f"[eval/regression] {traces_path} missing — skipped")
@@ -804,17 +813,23 @@ def _run_regression(model, tokenizer, trace_dir: Path, n_rows: int,
     df = pd.read_parquet(traces_path)
     failed = df[df["feedback.direct_debit_faithfulness"] < 1.0]
     budget = max_seq_length - max_completion_length - 64
-    candidates = []
+    items = []
     for _, row in failed.iterrows():
         pin = reconstruct_pin_from_trace(row)
         if pin is None:
             continue
-        if prompt_token_length(tokenizer, pin) <= budget:
-            candidates.append(pin)
-    candidates = candidates[:n_rows]
-    typer.echo(f"[eval/regression] scoring {len(candidates)} prior-failed traces "
+        if prompt_token_length(tokenizer, pin) > budget:
+            continue
+        items.append((
+            build_chat_messages(pin),
+            sorted(t.value for t in detect_triggers(pin)),
+            pin.model_dump(mode="json"),
+        ))
+        if len(items) >= n_rows:
+            break
+    typer.echo(f"[eval/regression] scoring {len(items)} prior-failed traces "
                f"(temp=0, batch={batch_size})…")
-    rows = _score_pins(model, tokenizer, candidates, max_completion_length, batch_size, "eval/regression")
+    rows = _score_items(model, tokenizer, items, max_completion_length, batch_size, "eval/regression")
     agg = _aggregate_scores(rows)
     typer.echo(f"[eval/regression] pass_all={agg.get('pass_all',0)}/{agg.get('n',0)} "
                f"({agg.get('pass_all_pct',0)}%) mean={agg.get('mean_total',0)}")

@@ -494,6 +494,85 @@ def plot_progress(task: Optional[str] = None) -> Path:
         print(f"Saved {png}")
     except Exception as e:
         print(f"(skipped PNG export: {e})")
+
+    # Eval-metrics chart (held-out + regression pass-rates over experiments).
+    plot_eval_progress(task)
+    return html
+
+
+def plot_eval_progress(task: Optional[str] = None) -> Path:
+    """Render `eval_progress.html`: held-out + regression pass-rate over time.
+
+    Only experiments whose row has a `metrics["heldout"]` or
+    `metrics["regression"]` block are plotted. Empty if the eval gate
+    hasn't run yet.
+    """
+    tasks = [task] if task else sorted(
+        d.name for d in EXPERIMENTS_DIR.iterdir() if d.is_dir() and (d / "results.jsonl").exists()
+    )
+    tasks = [t for t in tasks if load_results(t)]
+    if not tasks:
+        return Path()
+
+    fig = make_subplots(
+        rows=len(tasks), cols=1, vertical_spacing=0.18,
+        subplot_titles=[f"{t} — eval pass-rates" for t in tasks],
+    )
+    any_data = False
+    for i, t in enumerate(tasks, 1):
+        rows = sorted(load_results(t), key=lambda r: r["experiment"])
+        for series_key, label, color in (
+            ("heldout", "held-out (generalization)", "#3498db"),
+            ("regression", "regression (prior failures)", "#9b59b6"),
+        ):
+            xs, ys, hover = [], [], []
+            for r in rows:
+                ev = (r.get("metrics") or {}).get(series_key) or {}
+                if not ev.get("n"):
+                    continue
+                pct = ev.get("pass_all_pct", 0)
+                xs.append(r["experiment"])
+                ys.append(pct)
+                hover.append(
+                    f"<b>E{r['experiment']} — {label}</b><br>"
+                    f"pass_all = {ev.get('pass_all', 0)}/{ev['n']} ({pct:.1f}%)<br>"
+                    f"mean_total = {ev.get('mean_total', 0):.2f}"
+                )
+            if xs:
+                any_data = True
+                fig.add_trace(go.Scatter(
+                    x=xs, y=ys, mode="lines+markers", name=label,
+                    line=dict(color=color, width=2),
+                    marker=dict(size=10, color=color, line=dict(width=1, color="white")),
+                    hovertext=hover,
+                    hovertemplate="%{hovertext}<extra></extra>",
+                    legendgroup=series_key, showlegend=(i == 1),
+                ), row=i, col=1)
+        fig.update_yaxes(title_text="pass_all (%)", range=[0, 100],
+                         gridcolor="#eee", row=i, col=1)
+        fig.update_xaxes(title_text="Experiment #", dtick=1,
+                         gridcolor="#f4f4f4", row=i, col=1)
+
+    fig.update_layout(
+        title=dict(text="GRPO Eval Progress (held-out + regression)",
+                   font=dict(size=22, color="#222"),
+                   x=0.02, xanchor="left", y=0.985, yanchor="top"),
+        height=520 * len(tasks),
+        margin=dict(t=110, b=60, l=80, r=80),
+        template="plotly_white",
+        paper_bgcolor="white", plot_bgcolor="white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, bgcolor="rgba(255,255,255,0.95)",
+                    bordercolor="#bbb", borderwidth=1),
+        hovermode="closest",
+        hoverlabel=dict(align="left", bgcolor="white", bordercolor="#bbb",
+                        font=dict(size=11), namelength=-1),
+    )
+
+    out_dir = _task_dir(tasks[0]) if len(tasks) == 1 else EXPERIMENTS_DIR
+    html = out_dir / "eval_progress.html"
+    fig.write_html(str(html))
+    print(f"Saved {html}{' (no eval data yet)' if not any_data else ''}")
     return html
 
 
