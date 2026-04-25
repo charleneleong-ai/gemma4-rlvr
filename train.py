@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 import signal
 from collections import deque
 from pathlib import Path
@@ -598,6 +599,7 @@ def train(
     train_status = "RUNNING"
     crash_reason: str | None = None
     eval_metrics: dict = {}
+    entry: dict | None = None
     try:
         trainer.train()
         completed = int(getattr(trainer.state, "global_step", 0) or 0)
@@ -626,8 +628,8 @@ def train(
     finally:
         runtime_min = (time.monotonic() - started) / 60.0
         if settings.wandb.enabled and wandb.run is not None:
-            _autolog_experiment(settings, config_name, trainer, runtime_min, train_status,
-                                eval_metrics=eval_metrics, crash_reason=crash_reason)
+            entry = _autolog_experiment(settings, config_name, trainer, runtime_min, train_status,
+                                        eval_metrics=eval_metrics, crash_reason=crash_reason)
 
     t.save_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(t.save_path))
@@ -635,10 +637,22 @@ def train(
     _verify_adapter_nonzero(t.save_path)
     typer.echo(f"Saved LoRA adapter to {t.save_path}")
 
+    # Snapshot adapter weights to a per-experiment dir so retrospective eval
+    # is possible. Skip the tokenizer (~31MB, identical every run) — keep
+    # only the 533MB safetensors + tiny config.
+    if entry is not None and entry.get("experiment") is not None:
+        snap = t.save_path.parent / f"exp_{entry['experiment']}"
+        snap.mkdir(parents=True, exist_ok=True)
+        for fname in ("adapter_model.safetensors", "adapter_config.json"):
+            src = t.save_path / fname
+            if src.exists():
+                shutil.copy2(src, snap / fname)
+        typer.echo(f"Snapshotted adapter to {snap}")
+
 
 def _autolog_experiment(settings, config_name: str, trainer, runtime_min: float,
                         train_status: str, eval_metrics: dict | None = None,
-                        crash_reason: str | None = None) -> None:
+                        crash_reason: str | None = None) -> dict:
     """Append a row to experiments/<task>/results.jsonl + refresh the plot.
 
     Pulls best-reward / final-kl from `wandb.run.summary` (populated by the
@@ -669,7 +683,7 @@ def _autolog_experiment(settings, config_name: str, trainer, runtime_min: float,
     forced_status = "CRASH" if train_status == "CRASH" else None
     desc_tag = f"[{train_status.lower()}] " if train_status in ("CRASH", "EARLY_STOPPED") else ""
 
-    log_experiment(
+    entry = log_experiment(
         score=float(best_reward),
         description=f"{desc_tag}config={config_name}; {settings.wandb.notes or '(no notes)'}",
         config_name=config_name,
@@ -683,6 +697,7 @@ def _autolog_experiment(settings, config_name: str, trainer, runtime_min: float,
         wandb_run_name=wandb.run.name or "",
     )
     plot_progress()
+    return entry
 
 
 # =============================================================================
