@@ -16,6 +16,7 @@ from __future__ import annotations
 import itertools
 import json
 import random
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -791,7 +792,6 @@ _GENERATOR_VERSION = "1.0.0"
 
 
 def _summarise_triggers(rows: List[Dict[str, Any]]) -> Dict[str, int]:
-    from collections import Counter
     c = Counter(tuple(r["ground_truth_triggers"]) for r in rows)
     return {" + ".join(k) if k else "(none)": v for k, v in c.most_common()}
 
