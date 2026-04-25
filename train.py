@@ -641,7 +641,7 @@ def train(
     # is possible. Skip the tokenizer (~31MB, identical every run) — keep
     # only the 533MB safetensors + tiny config.
     if entry is not None and entry.get("experiment") is not None:
-        snap = t.save_path.parent / f"exp_{entry['experiment']}"
+        snap = t.save_path / f"exp_{entry['experiment']}"
         snap.mkdir(parents=True, exist_ok=True)
         for fname in ("adapter_model.safetensors", "adapter_config.json"):
             src = t.save_path / fname
@@ -734,7 +734,7 @@ def _generate_batch(model, tokenizer, messages_list, max_completion_length: int)
         for msgs in messages_list
     ]
     enc = tokenizer(
-        texts, add_special_tokens=False, return_tensors="pt",
+        text=texts, add_special_tokens=False, return_tensors="pt",
         padding=True, padding_side="left",
     ).to("cuda")
     out = model.generate(
@@ -779,7 +779,9 @@ def _score_items(model, tokenizer, items, max_completion_length: int,
                 model, tokenizer, [m for m, _, _ in chunk], max_completion_length,
             )
         except Exception as e:
-            typer.echo(f"[{label}] batch starting at {start} skipped: {e}")
+            import traceback
+            typer.echo(f"[{label}] batch starting at {start} skipped: {type(e).__name__}: {e}")
+            typer.echo(traceback.format_exc())
             continue
         for (_, gt, inp), completion in zip(chunk, completions):
             try:
