@@ -4,14 +4,13 @@ iter the autoresearch loop is on.
 Runs as a detached daemon (setsid + nohup) so it survives Claude / SSH
 disconnects. Polls the latest `logs/autoresearch_*.log` every N seconds:
 
-  * On the most recent `Iter N/M: ...` line that has no matching
-    `Iter N/M finished ...` line below it → write current_run.json.
-  * On the most recent `Iter N/M: ...` followed by `Iter N/M finished`
-    AND no fresher `Iter K/M:` after → delete current_run.json.
+  * On the most recent `Iter N/M: ...` line with no matching
+    `Iter N/M finished ...` below it → write current_run.json.
+  * On `Iter N/M finished` with no fresher `Iter K/M:` after → delete
+    current_run.json.
 
-This bridges the gap until the autoresearch.py changes (which write the
-sidecar inline) make it into a fresh process — the running PID 91317
-loaded the script before that hook existed.
+Useful as a fallback when the autoresearch process predates the inline
+sidecar writes (Python doesn't hot-reload an edited module).
 """
 from __future__ import annotations
 
