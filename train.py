@@ -236,6 +236,8 @@ _PREVIEW_STYLE = """
 .cp-tag-miss { color: #b91c1c; font-weight: 600; text-decoration: line-through; }
 .cp-tag-extra { color: #c2410c; font-weight: 600; font-style: italic; }
 .cp-scores { margin-top: 6px; font-size: 11px; color: #4b5563; font-family: monospace; }
+.cp-header-summary { font-size: 13px; color: #374151; padding: 8px 12px; background: #eef2ff;
+                     border-radius: 4px; margin: 0 0 12px 0; font-family: -apple-system, sans-serif; }
 </style>
 """
 
@@ -408,14 +410,22 @@ class CompletionPreviewCallback(TrainerCallback):
                 input_text=input_text, gt=gt, pred=pred,
                 completion=text, scores=scores, total=total,
             ))
-        # Re-log the full accumulated Table; each call replaces the previous
-        # artifact with a longer one, so the W&B panel always shows every
-        # firing in one scrubbable view.
+        # Re-log the full accumulated artifacts; each call replaces the
+        # previous version with a longer one, so the latest panel always shows
+        # every firing in one view. Two namespaces: train/preview/* for the
+        # filterable Table, train/images/* for the visual HTML cards.
         table = wandb.Table(columns=self._COLUMNS, data=self._rows)
-        html = _PREVIEW_STYLE + "\n".join(self._html_blocks)
+        # Step-count header so the HTML panel shows accumulation at a glance.
+        firing_steps = sorted({row[0] for row in self._rows})
+        html_header = (
+            f"<p class='cp-header-summary'><b>{len(firing_steps)}</b> preview firings"
+            f" · steps: {', '.join(map(str, firing_steps))}"
+            f" · latest: <b>{state.global_step}</b></p>"
+        )
+        html = _PREVIEW_STYLE + html_header + "\n".join(self._html_blocks)
         wandb.log({
-            "train/completions_preview": table,
-            "train/completions_preview_html": wandb.Html(html),
+            "train/preview/completions_table": table,
+            "train/images/completions_preview": wandb.Html(html),
         })
 
 
