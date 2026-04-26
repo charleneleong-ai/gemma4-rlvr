@@ -95,8 +95,12 @@ KL_DIVERGE = 1.0           # |kl| above this = policy collapse
 LOSS_DIVERGE = 10.0        # |loss| above this = numerical blow-up
 NO_LEARN_WINDOW = 25       # steps without beating baseline-1 reward = abandon
 
-GPU_LOW_UTIL_PCT  = 8      # % below which GPU counts as idle
+GPU_LOW_UTIL_PCT  = 8      # % below which GPU counts as idle (hang)
 GPU_LOW_UTIL_S    = 300    # 5 min consecutive idle → hang kill
+GPU_UNDERUTIL_PCT = 35     # % below which GPU counts as wasted (not hung)
+GPU_UNDERUTIL_S   = 900    # 15 min consecutive low-util → wasted-compute kill.
+                           # Longer than typical eval phase (~5-10min on 8192 ctx)
+                           # so we don't kill mid-eval; assumes warmup grace covered.
 GPU_GRACE_S       = 180    # 3 min startup grace (model loading)
 GPU_POLL_S        = 30     # nvidia-smi poll interval (s)
 GPU_MEM_HEADROOM  = 0.65   # if peak_mem/total < this → suggest bigger batch
@@ -339,23 +343,43 @@ def _run_with_triage(cmd: list[str], baseline_score: float, config_name: str = "
 
     def _gpu_watcher():
         _gpu_stop.wait(GPU_GRACE_S)  # wait out model loading
-        low_since: float | None = None
+        low_since: float | None = None       # ≤8%: hang
+        under_since: float | None = None     # ≤35%: wasted compute
         while not _gpu_stop.is_set() and proc.poll() is None:
             s = _gpu_stats()
             if s:
                 gpu_samples.append(s)
-                if s["util_pct"] < GPU_LOW_UTIL_PCT:
+                util = s["util_pct"]
+                # Hang detection (existing) — also counts toward underutil window.
+                if util < GPU_LOW_UTIL_PCT:
                     if low_since is None:
                         low_since = time.monotonic()
                     elif time.monotonic() - low_since >= GPU_LOW_UTIL_S:
                         gpu_kill_reason.append(
-                            f"GPU util {s['util_pct']}% < {GPU_LOW_UTIL_PCT}% "
+                            f"GPU util {util}% < {GPU_LOW_UTIL_PCT}% "
                             f"for {GPU_LOW_UTIL_S // 60}min+ — likely hang"
+                        )
+                        _gpu_stop.set()
+                        break
+                    if under_since is None:
+                        under_since = time.monotonic()
+                # Underutil detection — sustained low (but not hung) compute.
+                elif util < GPU_UNDERUTIL_PCT:
+                    low_since = None
+                    if under_since is None:
+                        under_since = time.monotonic()
+                    elif time.monotonic() - under_since >= GPU_UNDERUTIL_S:
+                        gpu_kill_reason.append(
+                            f"GPU util sustained <{GPU_UNDERUTIL_PCT}% "
+                            f"for {GPU_UNDERUTIL_S // 60}min+ — wasted compute "
+                            f"(last sample {util}%, {s['mem_used_gb']:.0f}/"
+                            f"{s['mem_total_gb']:.0f}GB)"
                         )
                         _gpu_stop.set()
                         break
                 else:
                     low_since = None
+                    under_since = None
             _gpu_stop.wait(GPU_POLL_S)
 
     _gpu_thread = threading.Thread(target=_gpu_watcher, daemon=True, name="gpu-watcher")
