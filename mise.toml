@@ -86,8 +86,11 @@ description = "One-shot GPU snapshot (memory + util)."
 run = "nvidia-smi --query-gpu=name,memory.used,memory.free,utilization.gpu --format=csv,noheader"
 
 [tasks.chart]
-description = "Regenerate experiments/dd_explainer/progress.html from results.jsonl."
-run = ".venv/bin/python -c 'from experiments.experiment_progress import plot_progress; plot_progress(\"dd_explainer\")'"
+description = "Regenerate progress.html for a config (default: train_v2_80gb). Pass config name as arg."
+run = """
+CFG="${1:-train_v2_80gb}"
+.venv/bin/python -c "from experiments.experiment_progress import plot_progress; plot_progress(\\"dd_explainer\\", config_name=\\"$CFG\\")"
+"""
 
 [tasks.tail]
 description = "Follow the most recent autoresearch / smoke log (interactive — Ctrl-C to detach)."

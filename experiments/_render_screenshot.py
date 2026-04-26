@@ -1,26 +1,35 @@
 """One-shot matplotlib renderer for the PR screenshot.
 
-Reads the same `experiments/dd_explainer/results.jsonl` the Plotly chart
-uses and renders a static PNG that mirrors the visual encoding (status
-colour + best-run halo + kill_reason inline). Not used at runtime — only
-invoked manually to refresh `docs/autoresearch_progress.png`.
+Reads the per-config `experiments/dd_explainer/<config_name>/results.jsonl`
+the Plotly chart uses and renders a static PNG that mirrors the visual
+encoding (status colour + best-run halo + kill_reason inline). Output
+filename is also config-scoped: `docs/autoresearch_progress_<config>.png`.
+
+Usage:
+  python experiments/_render_screenshot.py <config_name>
 """
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 
 from experiment_progress import _STATUS_STYLE, _kill_tag, load_results
 
-OUT = Path(__file__).resolve().parent.parent / "docs" / "autoresearch_progress.png"
+DOCS = Path(__file__).resolve().parent.parent / "docs"
 
 
 def main() -> None:
-    rows = sorted(load_results("dd_explainer"), key=lambda r: r["experiment"])
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: _render_screenshot.py <config_name>")
+    config_name = sys.argv[1]
+    rows = sorted(load_results("dd_explainer", config_name=config_name),
+                  key=lambda r: r["experiment"])
     if not rows:
-        raise SystemExit("no results to plot")
+        raise SystemExit(f"no results to plot for config {config_name!r}")
+    out = DOCS / f"autoresearch_progress_{config_name}.png"
 
     best_exp = max(rows, key=lambda r: r["score"])["experiment"]
 
@@ -96,7 +105,7 @@ def main() -> None:
     runtime = sum(r.get("runtime_min", 0) for r in rows)
 
     ax.set_title(
-        f"GRPO Autoresearch — dd_explainer\n"
+        f"GRPO Autoresearch — dd_explainer · {config_name}\n"
         f"{n} experiments · {n_kept} kept · {n_killed} killed early · {n_crash} crashed · {runtime:.0f}min total",
         fontsize=14, color="#222", pad=20,
     )
@@ -110,10 +119,10 @@ def main() -> None:
     ymax = max(r["score"] for r in rows) + 3
     ax.set_ylim(ymin, ymax)
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
-    plt.savefig(OUT, dpi=140, facecolor="white", bbox_inches="tight")
-    print(f"wrote {OUT}  ({OUT.stat().st_size // 1024} KB)")
+    plt.savefig(out, dpi=140, facecolor="white", bbox_inches="tight")
+    print(f"wrote {out}  ({out.stat().st_size // 1024} KB)")
 
 
 if __name__ == "__main__":

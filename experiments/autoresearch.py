@@ -43,9 +43,20 @@ import typer
 ROOT = Path(__file__).resolve().parent.parent
 PYTHON = ROOT / ".venv" / "bin" / "python"
 TRAIN = ROOT / "train.py"
-RESULTS = ROOT / "experiments" / "dd_explainer" / "results.jsonl"
-CURRENT = ROOT / "experiments" / "dd_explainer" / "current_run.json"
+TASK = "dd_explainer"
 LOG_PATH_ENV = "AUTORESEARCH_LOG_PATH"
+
+
+def _results_path(config_name: str) -> Path:
+    p = ROOT / "experiments" / TASK / config_name
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "results.jsonl"
+
+
+def _current_path(config_name: str) -> Path:
+    p = ROOT / "experiments" / TASK / config_name
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "current_run.json"
 
 SCHEDULES_DIR = ROOT / "configs" / "schedules"
 
@@ -88,17 +99,20 @@ def _ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _baseline_score() -> float:
-    """Best train-reward score among prior KEEP/BASELINE rows, else -inf.
+def _baseline_score(config_name: str) -> float:
+    """Best train-reward score among prior KEEP/BASELINE rows for this config.
 
     Used by the mid-training triage gate (the `no reward > baseline-1` rule
     in `_run_with_triage`). Triage compares against in-flight train rewards,
     so this must stay train-reward-scaled — *not* heldout. The KEEP/DISCARD
     decision uses heldout via `experiment_progress.promotion_score` instead.
+
+    Scoped per-config so triage thresholds don't bleed across presets.
     """
-    if not RESULTS.exists():
+    p = _results_path(config_name)
+    if not p.exists():
         return float("-inf")
-    rows = [json.loads(l) for l in RESULTS.read_text().strip().splitlines() if l]
+    rows = [json.loads(l) for l in p.read_text().strip().splitlines() if l]
     kept = [r["score"] for r in rows if r.get("status") in ("KEEP", "BASELINE")]
     return max(kept) if kept else float("-inf")
 
@@ -130,16 +144,17 @@ def _crash_reason_from_lines(lines: list[str]) -> str:
     return f"unknown: {last[:120]}" if last else "unknown crash"
 
 
-def _patch_last_with_crash_reason(crash_reason: str) -> None:
+def _patch_last_with_crash_reason(config_name: str, crash_reason: str) -> None:
     """Add `crash_reason` to the latest results.jsonl row's metrics.
 
     Called when autoresearch detects a non-zero child exit with no triage
     kill_reason — the row was already written by train.py's finally hook
     with status=CRASH but no detected cause.
     """
-    if not RESULTS.exists():
+    p = _results_path(config_name)
+    if not p.exists():
         return
-    lines = RESULTS.read_text().splitlines()
+    lines = p.read_text().splitlines()
     if not lines:
         return
     try:
@@ -150,11 +165,11 @@ def _patch_last_with_crash_reason(crash_reason: str) -> None:
         return
     last.setdefault("metrics", {})["crash_reason"] = crash_reason
     lines[-1] = json.dumps(last)
-    RESULTS.write_text("\n".join(lines) + "\n")
+    p.write_text("\n".join(lines) + "\n")
     print(f"[{_ts()}] [autoresearch] tagged last CRASH row with crash_reason={crash_reason!r}")
 
 
-def _relabel_last_as_early_kill(kill_reason: str) -> None:
+def _relabel_last_as_early_kill(config_name: str, kill_reason: str) -> None:
     """Rewrite the last results.jsonl row from CRASH→EARLY_KILL.
 
     train.py's finally hook can't distinguish a triage SIGINT from a real
@@ -162,9 +177,10 @@ def _relabel_last_as_early_kill(kill_reason: str) -> None:
     deliberate, so we patch the row here so the chart can colour triaged
     kills (grey) separately from true crashes (red).
     """
-    if not RESULTS.exists():
+    p = _results_path(config_name)
+    if not p.exists():
         return
-    lines = RESULTS.read_text().splitlines()
+    lines = p.read_text().splitlines()
     if not lines:
         return
     try:
@@ -182,7 +198,7 @@ def _relabel_last_as_early_kill(kill_reason: str) -> None:
         desc = "[early-kill] " + desc
     last["description"] = desc
     lines[-1] = json.dumps(last)
-    RESULTS.write_text("\n".join(lines) + "\n")
+    p.write_text("\n".join(lines) + "\n")
     print(f"[{_ts()}] [autoresearch] relabelled last row CRASH→EARLY_KILL ({kill_reason})")
 
 
@@ -346,7 +362,9 @@ def main(
     total = len(iters)
 
     for i, (config, extras, notes) in enumerate(iters, start=1):
-        baseline = _baseline_score()
+        baseline = _baseline_score(config)
+        results_p = _results_path(config)
+        current_p = _current_path(config)
         desc = f"[autoresearch {i}/{total}] {notes}"
         cmd = [
             str(PYTHON), str(TRAIN), "train",
@@ -362,8 +380,8 @@ def main(
         if not log_path:
             logs = sorted((ROOT / "logs").glob("autoresearch_*.log"))
             log_path = str(logs[-1]) if logs else ""
-        prior_n = sum(1 for _ in RESULTS.read_text().splitlines() if _.strip()) if RESULTS.exists() else 0
-        CURRENT.write_text(json.dumps({
+        prior_n = sum(1 for _ in results_p.read_text().splitlines() if _.strip()) if results_p.exists() else 0
+        current_p.write_text(json.dumps({
             "experiment": prior_n,
             "config_name": config,
             "description": desc,
@@ -378,11 +396,13 @@ def main(
             ret, kill_reason, crash_reason = _run_with_triage(cmd, baseline)
         except KeyboardInterrupt:
             print(f"[{_ts()}] [autoresearch] aborted by SIGINT at iter {i}/{total}.")
-            CURRENT.unlink(missing_ok=True)
+            current_p.unlink(missing_ok=True)
             return
         if kill_reason:
-            _relabel_last_as_early_kill(kill_reason)
-        CURRENT.unlink(missing_ok=True)
+            _relabel_last_as_early_kill(config, kill_reason)
+        elif crash_reason:
+            _patch_last_with_crash_reason(config, crash_reason)
+        current_p.unlink(missing_ok=True)
         mins = (time.monotonic() - iter_start) / 60.0
         if kill_reason:
             outcome = f"triaged: {kill_reason}"
@@ -396,8 +416,12 @@ def main(
 
     total_h = (time.monotonic() - started) / 3600.0
     print(f"\n[{_ts()}] Autoresearch finished — {total} iterations in {total_h:.2f}h.")
-    print(f"[{_ts()}] Final results: {RESULTS}")
-    print(f"[{_ts()}] Plot:          {RESULTS.parent / 'progress.html'}")
+    # Per-config artifacts: list every config touched in this schedule.
+    seen_configs = sorted({cfg for cfg, _, _ in iters})
+    for cfg in seen_configs:
+        rp = _results_path(cfg)
+        print(f"[{_ts()}] Final results [{cfg}]: {rp}")
+        print(f"[{_ts()}] Plot           [{cfg}]: {rp.parent / 'progress.html'}")
 
 
 if __name__ == "__main__":
