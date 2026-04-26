@@ -101,6 +101,10 @@ GPU_UNDERUTIL_PCT = 35     # % below which GPU counts as wasted (not hung)
 GPU_UNDERUTIL_S   = 900    # 15 min consecutive low-util → wasted-compute kill.
                            # Longer than typical eval phase (~5-10min on 8192 ctx)
                            # so we don't kill mid-eval; assumes warmup grace covered.
+GPU_LOW_MEM_PCT   = 50     # peak memory % below which → undersized config
+GPU_LOW_MEM_S     = 1800   # 30 min without ever hitting 50% mem → kill.
+                           # Uses peak-so-far so eval spikes can save the run;
+                           # only fires if training never approaches the budget.
 GPU_GRACE_S       = 180    # 3 min startup grace (model loading)
 GPU_POLL_S        = 30     # nvidia-smi poll interval (s)
 GPU_MEM_HEADROOM  = 0.65   # if peak_mem/total < this → suggest bigger batch
@@ -345,11 +349,16 @@ def _run_with_triage(cmd: list[str], baseline_score: float, config_name: str = "
         _gpu_stop.wait(GPU_GRACE_S)  # wait out model loading
         low_since: float | None = None       # ≤8%: hang
         under_since: float | None = None     # ≤35%: wasted compute
+        mem_low_since: float | None = None   # peak <50%: undersized config
+        peak_mem_pct = 0.0                   # max mem% ever seen
         while not _gpu_stop.is_set() and proc.poll() is None:
             s = _gpu_stats()
             if s:
                 gpu_samples.append(s)
                 util = s["util_pct"]
+                mem_pct = s["mem_used_gb"] / s["mem_total_gb"] * 100
+                peak_mem_pct = max(peak_mem_pct, mem_pct)
+
                 # Hang detection (existing) — also counts toward underutil window.
                 if util < GPU_LOW_UTIL_PCT:
                     if low_since is None:
@@ -380,6 +389,24 @@ def _run_with_triage(cmd: list[str], baseline_score: float, config_name: str = "
                 else:
                     low_since = None
                     under_since = None
+
+                # Memory underuse — peak never hit threshold → undersized config.
+                # Eval spikes count: peak_mem_pct is monotonic, so once any
+                # phase hits 50%+, the kill clock stops permanently.
+                if peak_mem_pct < GPU_LOW_MEM_PCT:
+                    if mem_low_since is None:
+                        mem_low_since = time.monotonic()
+                    elif time.monotonic() - mem_low_since >= GPU_LOW_MEM_S:
+                        gpu_kill_reason.append(
+                            f"peak GPU mem {peak_mem_pct:.0f}% < {GPU_LOW_MEM_PCT}% "
+                            f"for {GPU_LOW_MEM_S // 60}min+ — undersized config "
+                            f"({s['mem_used_gb']:.0f}/{s['mem_total_gb']:.0f}GB; "
+                            f"try larger batch / num_generations / max_seq_length)"
+                        )
+                        _gpu_stop.set()
+                        break
+                else:
+                    mem_low_since = None
             _gpu_stop.wait(GPU_POLL_S)
 
     _gpu_thread = threading.Thread(target=_gpu_watcher, daemon=True, name="gpu-watcher")
