@@ -81,33 +81,51 @@ Surgical retro-eval mode: only **#20** (the v1 best by train reward) was re-eval
 ## Setup on new 80GB box
 
 Vast.ai instance specs:
-- A100-80GB SXM4 or PCIe (either works)
+- A100-80GB PCIe (or SXM4 — either works; PCIe is what we costed against)
 - Image: `pytorch:2.6.0-cuda12.4` or similar — Unsloth supports CUDA 12.4+
 - ≥ 100 GB disk (snapshots, datasets, wandb cache)
 - ssh key configured
 
+The repo now has `mise.toml` task definitions and a fully-tracked `pyproject.toml` + `uv.lock` (added 2026-04-26 in commits `b25ce0d` + `ee8a7da`), so setup is one-shot:
+
 ```bash
-# 1. Clone repo
+# 1. Clone + check out
 cd /workspace
 git clone git@github.com:charleneleong-ai/gemma4-rlvr.git
 cd gemma4-rlvr
-git checkout feat/auto-research-loop  # or main once PR #5 merges
+git checkout feat/auto-research-loop  # or main once feat/ merges
 
-# 2. Set up venv (matches existing setup script)
-./install.sh  # creates .venv, installs deps, fetches model
+# 2. Install mise (one-time; if not already on the box)
+curl https://mise.jdx.dev/install.sh | sh
+exec $SHELL
 
-# 3. Secrets — needed because wandb run resume doesn't work without them
+# 3. Bootstrap the venv — creates .venv, runs uv sync from lockfile,
+#    verifies torch/transformers/trl/unsloth import + CUDA detection
+mise run init
+
+# 4. Secrets — needed for wandb run resume + HF model download
 cp .env.example .env
-# Fill in: WANDB_API_KEY, HF_TOKEN if needed
+# Fill in: WANDB_API_KEY, HF_TOKEN
 
-# 4. Sanity check: model loads, dataset loads, one-batch train works
-.venv/bin/python -u train.py train -c train_smoke -d "[v2 smoke] env verification" \
-  --max-steps 2 --eval-heldout-n 0 --eval-regression-n 0
-# expected: 2 steps complete in <5 min, no OOM, wandb run shows up
+# 5. Smoke test — 2-step v2 train, detached, no eval, wandb disabled.
+#    Survives ssh/cc death; tail the printed log path to watch progress.
+mise run smoke
 
-# 5. Verify GPU memory headroom
+# 6. Verify GPU memory headroom (from smoke, then after first real train)
 nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader
-# expected after smoke: 30-40 GB used / 40-50 GB free
+# expected after a full v2 train iter: ~50-60 GB used / 20-30 GB free
+```
+
+Manual fallback if `mise` isn't available:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/pip install uv
+.venv/bin/uv sync
+WANDB_MODE=disabled .venv/bin/python -u train.py train \
+  -c train_v2_80gb -d "[v2 smoke]" \
+  --max-steps 2 --eval-heldout-n 0 --eval-regression-n 0 \
+  --completion-preview-every 0
 ```
 
 ---
@@ -175,16 +193,27 @@ Schedule lives at `configs/schedules/v2_baseline.yaml` — pure YAML, edit there
 4. `beta=0.02` (lower KL — more exploration, was v1 #5)
 5. `lora_rank=64` (drop back — tests if rank=128 is wasted)
 
-Launch:
+Launch (via mise — auto-detached, survives ssh/cc death):
 
 ```bash
-.venv/bin/python -u experiments/autoresearch.py \
-  --schedule v2_baseline \
-  > logs/v2_sweep1_baseline.log 2>&1 &
+mise run sweep v2_baseline
+# Prints log path; follow with: tail -F logs/sweep_v2_baseline_<timestamp>.log
+# Status: mise run ps  (lists detached training/sweep PIDs)
+# GPU:    mise run gpu  (live nvidia-smi)
+# Kill:   mise run kill-train  (graceful SIGINT to all detached training)
+```
+
+Manual fallback:
+
+```bash
+setsid nohup .venv/bin/python -u experiments/autoresearch.py \
+  --schedule v2_baseline > logs/v2_sweep1_baseline.log 2>&1 < /dev/null &
+disown
 ```
 
 Stop conditions:
-- If iter 1 (anchor) heldout `mean_total` < v1 best (8.49), **STOP** — something regressed in the migration. Debug rubric_version mismatch first.
+- If iter 1 (anchor) heldout `mean_total` < v1 anchor (**8.536**, see scoreboard above), **STOP** — something regressed in the migration. Debug rubric_version mismatch first, then transformers/unsloth versions, then hardware-specific Unsloth patches.
+- If `pass_all_pct` < 14.1% on iter 1, similar — investigate before continuing.
 - If iter 1 anchor > 9.0, the v2 stack is winning — proceed with HP search.
 
 ### Sweep 2 — HP search around v2 winner (~9 hrs, $7.30)
