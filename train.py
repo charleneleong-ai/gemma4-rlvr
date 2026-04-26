@@ -297,7 +297,6 @@ class CompletionPreviewCallback(TrainerCallback):
             if was_training:
                 model.train()
 
-        scalar_log: dict = {}
         for i, ((split, item), comp) in enumerate(zip(self._items, completions)):
             text = comp[0]["content"] if isinstance(comp, list) else str(comp)
             try:
@@ -338,20 +337,11 @@ class CompletionPreviewCallback(TrainerCallback):
                 scores["underpayment_ok"], scores["well_formed"],
                 total,
             ])
-            # Per-prompt scalar trajectories — each fixed sample gets its own
-            # line in the W&B workspace. Lets you spot which prompts the model
-            # learns quickly vs. which stay stuck. Key shape mirrors the Table
-            # so it's filter-friendly: train/preview/<split>_<idx>/<metric>.
-            scalar_log[f"train/preview/{split}_{i}/f1_triggers"] = scores["f1_triggers"]
-            scalar_log[f"train/preview/{split}_{i}/well_formed"] = scores["well_formed"]
-            scalar_log[f"train/preview/{split}_{i}/no_hallucinated_facts"] = scores["no_hallucinated_facts"]
-            scalar_log[f"train/preview/{split}_{i}/total"] = total
         # Re-log the full accumulated Table; each call replaces the previous
         # artifact with a longer one, so the W&B panel always shows every
         # firing in one scrubbable view.
         table = wandb.Table(columns=self._COLUMNS, data=self._rows)
-        scalar_log["train/completions_preview"] = table
-        wandb.log(scalar_log)
+        wandb.log({"train/completions_preview": table})
 
 
 # =============================================================================
