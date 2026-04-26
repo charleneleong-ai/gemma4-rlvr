@@ -77,6 +77,7 @@ from dd_explainer_data_generator import (  # noqa: E402
 )
 from dd_explainer_rewards import (  # noqa: E402
     REWARD_FUNCS,
+    RUBRIC_VERSION,
     parse_response,
     score_completion,
 )
@@ -218,6 +219,98 @@ class WandbMetricDefsCallback(TrainerCallback):
 
         if out:
             wandb.log(out)
+
+
+class CompletionPreviewCallback(TrainerCallback):
+    """Every `every_n_steps`, generate completions for a fixed sample of train +
+    held-out prompts and log them to W&B as a table.
+
+    Lets you scrub through training in the W&B UI to see how outputs evolve —
+    catches reward-hacking, mode collapse, missing rubric triggers (like
+    `prev_amount_correct` not firing because the model never cites £ figures),
+    and the train-vs-heldout gap.
+
+    Sampling is deterministic (fixed indices, temp=0) so you can compare the
+    *same* prompt across steps. ~3-5s overhead per logged step on A100.
+    """
+
+    def __init__(
+        self,
+        train_dataset,
+        heldout_dataset,
+        tokenizer,
+        max_completion_length: int,
+        every_n_steps: int = 25,
+        n_train: int = 4,
+        n_heldout: int = 4,
+        excerpt_chars: int = 400,
+    ) -> None:
+        self.tok = tokenizer
+        self.max_comp = max_completion_length
+        self.every = every_n_steps
+        self.excerpt_chars = excerpt_chars
+        # Deterministic fixed indices — same prompts every preview step.
+        self._items: list[tuple[str, dict]] = []
+        for i in range(min(n_train, len(train_dataset))):
+            self._items.append(("train", train_dataset[i]))
+        if heldout_dataset is not None:
+            for i in range(min(n_heldout, len(heldout_dataset))):
+                self._items.append(("heldout", heldout_dataset[i]))
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.every <= 0 or state.global_step == 0:
+            return
+        if state.global_step % self.every != 0:
+            return
+        if wandb.run is None or not self._items:
+            return
+        model = kwargs.get("model")
+        if model is None:
+            return
+
+        was_training = model.training
+        model.eval()
+        try:
+            prompts = [it["prompt"] for _, it in self._items]
+            completions = _generate_batch(model, self.tok, prompts, self.max_comp)
+        except Exception as e:  # noqa: BLE001
+            print(f"[completions_preview] step {state.global_step} skipped: {e}")
+            if was_training:
+                model.train()
+            return
+        finally:
+            if was_training:
+                model.train()
+
+        table = wandb.Table(columns=[
+            "step", "split", "idx", "expected_triggers", "predicted_triggers",
+            "completion_excerpt",
+            "schema_valid", "in_enum", "f1_triggers",
+            "prev_amount_correct", "no_hallucinated_facts",
+            "underpayment_ok", "well_formed", "total",
+        ])
+        for i, ((split, item), comp) in enumerate(zip(self._items, completions)):
+            text = comp[0]["content"] if isinstance(comp, list) else str(comp)
+            try:
+                parsed = parse_response(text)
+                pred = sorted({e.trigger.value for e in parsed.explanations}) if parsed else []
+            except Exception:  # noqa: BLE001
+                pred = ["<parse error>"]
+            gt = item.get("ground_truth_triggers") or []
+            inp = item["input_json"]
+            if isinstance(inp, str):
+                inp = json.loads(inp)
+            scores = score_completion(text, gt, inp)
+            excerpt = text.replace("\n", " ⏎ ")[: self.excerpt_chars]
+            table.add_data(
+                state.global_step, split, i,
+                ", ".join(gt), ", ".join(pred), excerpt,
+                scores["schema_valid"], scores["in_enum"], scores["f1_triggers"],
+                scores["prev_amount_correct"], scores["no_hallucinated_facts"],
+                scores["underpayment_ok"], scores["well_formed"],
+                round(sum(scores.values()), 3),
+            )
+        wandb.log({"train/completions_preview": table})
 
 
 # =============================================================================
@@ -540,6 +633,23 @@ def train(
         )
     if settings.wandb.enabled:
         callbacks.append(WandbMetricDefsCallback())
+        if t.completion_preview_every > 0:
+            callbacks.append(CompletionPreviewCallback(
+                train_dataset=dataset,
+                heldout_dataset=heldout_ds,
+                tokenizer=tokenizer,
+                max_completion_length=t.max_completion_length,
+                every_n_steps=t.completion_preview_every,
+                n_train=t.completion_preview_n_train,
+                n_heldout=t.completion_preview_n_heldout,
+            ))
+            n_total = t.completion_preview_n_train + (
+                t.completion_preview_n_heldout if heldout_ds is not None else 0
+            )
+            typer.echo(
+                f"Completion preview: {n_total} prompts to W&B "
+                f"every {t.completion_preview_every} steps"
+            )
 
     training_args = GRPOConfig(
         temperature=1.0,
@@ -721,6 +831,15 @@ _REWARD_MAX = {
 }
 _REWARD_TOTAL_MAX = sum(_REWARD_MAX.values())  # 16.0
 
+# Per-rubric pass-thresholds for `pass_all`. Default = the rubric's max score
+# (i.e. must hit the top score to pass). `prev_amount_correct` is overridden to
+# 0.0 because it's a defensive guardrail for hallucinated £ amounts — score 0
+# = "no amount cited" (safe), +2 = "cited and correct", -3 = "cited and wrong".
+# The prompt never instructs the model to cite a previous amount, so requiring
+# +2 to pass turns the guardrail into an unreachable bar. Threshold 0.0 means
+# "didn't hallucinate" counts as pass; only an actively-wrong cite (-3) fails.
+_PASS_ALL_THRESHOLD: dict = {"prev_amount_correct": 0.0}
+
 
 @torch.no_grad()
 def _generate_batch(model, tokenizer, messages_list, max_completion_length: int) -> list[str]:
@@ -753,11 +872,16 @@ def _aggregate_scores(rows: list[dict]) -> dict:
     n = len(rows)
     out: dict = {"n": n}
     pass_all = 0
+    pass_thresholds = [(k, _PASS_ALL_THRESHOLD.get(k, mx)) for k, mx in _REWARD_MAX.items()]
     for row in rows:
-        if all(row.get(k, 0.0) >= mx - 1e-6 for k, mx in _REWARD_MAX.items()):
+        if all(row.get(k, 0.0) >= thr - 1e-6 for k, thr in pass_thresholds):
             pass_all += 1
     out["pass_all"] = pass_all
     out["pass_all_pct"] = round(100 * pass_all / n, 1)
+    out["pass_thresholds"] = {
+        k: _PASS_ALL_THRESHOLD.get(k, mx) for k, mx in _REWARD_MAX.items()
+    }
+    out["rubric_version"] = RUBRIC_VERSION
     # Per-component pass rate + mean
     for k, mx in _REWARD_MAX.items():
         vals = [row.get(k, 0.0) for row in rows]
@@ -765,6 +889,25 @@ def _aggregate_scores(rows: list[dict]) -> dict:
         out[f"{k}_mean"] = round(sum(vals) / n, 3)
     out["mean_total"] = round(sum(sum(row.get(k, 0.0) for k in _REWARD_MAX) for row in rows) / n, 3)
     return out
+
+
+def _log_eval_to_wandb(split: str, agg: dict) -> None:
+    """Push aggregate eval metrics to the active wandb run under `eval/<split>/*`.
+
+    No-op when no wandb run is active (e.g. WANDB_MODE=disabled, or when the
+    retro-eval script runs without first calling `wandb.init`). Skips array-
+    valued / non-numeric fields to keep the wandb panel clean.
+    """
+    if wandb.run is None or not agg.get("n"):
+        return
+    payload: dict = {f"eval/{split}/n": agg["n"]}
+    skip = {"n", "pass_all_excludes", "pass_thresholds"}
+    for k, v in agg.items():
+        if k in skip:
+            continue
+        if isinstance(v, (int, float)):
+            payload[f"eval/{split}/{k}"] = v
+    wandb.log(payload)
 
 
 def _score_items(model, tokenizer, items, max_completion_length: int,
@@ -812,6 +955,7 @@ def _run_heldout(model, tokenizer, heldout_ds, max_completion_length: int,
     agg = _aggregate_scores(rows)
     typer.echo(f"[eval/heldout] pass_all={agg.get('pass_all',0)}/{agg.get('n',0)} "
                f"({agg.get('pass_all_pct',0)}%) mean={agg.get('mean_total',0)}")
+    _log_eval_to_wandb("heldout", agg)
     return agg
 
 
@@ -850,6 +994,7 @@ def _run_regression(model, tokenizer, trace_dir: Path, n_rows: int,
     agg = _aggregate_scores(rows)
     typer.echo(f"[eval/regression] pass_all={agg.get('pass_all',0)}/{agg.get('n',0)} "
                f"({agg.get('pass_all_pct',0)}%) mean={agg.get('mean_total',0)}")
+    _log_eval_to_wandb("regression", agg)
     return agg
 
 
