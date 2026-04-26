@@ -337,11 +337,11 @@ class CompletionPreviewCallback(TrainerCallback):
         # time, so the latest version contains every row and the user can
         # filter / scrub by the `step` column in the Table panel.
         self._rows: list[list] = []
-        # Parallel HTML buffer. Each step appends a styled side-by-side card
-        # block (input | gt vs pred | completion) per fixed sample. Re-logged
-        # as wandb.Html under train/completions_preview_html for a visual
-        # scanning view that complements the Table's filter/sort affordances.
-        self._html_blocks: list[str] = []
+        # `_step_history` collects the training steps a preview has fired at,
+        # so the HTML panel header can show the step bar even though each
+        # firing logs only THIS step's HTML cards (so the W&B media slider
+        # is meaningful — drag to step through firings).
+        self._step_history: list[int] = []
 
     def on_step_end(self, args, state, control, **kwargs):
         if self.every <= 0 or state.global_step == 0:
@@ -368,6 +368,12 @@ class CompletionPreviewCallback(TrainerCallback):
             if was_training:
                 model.train()
 
+        # Per-firing HTML buffer (reset each call). Wandb's media slider
+        # cycles through historical artifacts logged under the same key —
+        # so each step needs its own self-contained HTML, not the accumulated
+        # one. The Table separately accumulates (filter/sort handles history).
+        step_blocks: list[str] = []
+        self._step_history.append(state.global_step)
         for i, ((split, item), comp) in enumerate(zip(self._items, completions)):
             text = comp[0]["content"] if isinstance(comp, list) else str(comp)
             try:
@@ -408,10 +414,9 @@ class CompletionPreviewCallback(TrainerCallback):
                 scores["underpayment_ok"], scores["well_formed"],
                 total,
             ])
-            # Build a side-by-side card for this sample. The whole HTML buffer
-            # is re-rendered each firing, so the latest panel always contains
-            # every step's blocks in chronological order.
-            self._html_blocks.append(_render_preview_block(
+            # Build a side-by-side card for THIS step only — the wandb media
+            # slider then has one artifact per firing to cycle through.
+            step_blocks.append(_render_preview_block(
                 step=state.global_step, split=split, idx=i,
                 input_text=input_text, gt=gt, pred=pred,
                 completion=text, scores=scores, total=total,
@@ -421,30 +426,31 @@ class CompletionPreviewCallback(TrainerCallback):
         # every firing in one view. Two namespaces: train/preview/* for the
         # filterable Table, train/images/* for the visual HTML cards.
         table = wandb.Table(columns=self._COLUMNS, data=self._rows)
-        # Visual step bar at the top of the HTML panel — pill chips for each
-        # firing, latest highlighted. Accumulation is at-a-glance instead of
-        # in a text summary.
-        firing_steps = sorted({row[0] for row in self._rows})
+        # Step pill bar shows ALL firings (history) so each artifact still
+        # carries the context of which step it is in the sequence — useful
+        # when the slider lands you on an intermediate firing.
         pills = []
-        for i, s in enumerate(firing_steps):
+        for i, s in enumerate(self._step_history):
             cls = "cp-step-pill cp-step-latest" if s == state.global_step else "cp-step-pill"
             pills.append(f"<span class='{cls}'>step {s}</span>")
-            if i < len(firing_steps) - 1:
+            if i < len(self._step_history) - 1:
                 pills.append("<span class='cp-step-arrow'>→</span>")
         html_header = (
             "<div class='cp-header-summary'>"
-            f"<span class='cp-step-label'>{len(firing_steps)} firings</span>"
+            f"<span class='cp-step-label'>firing {len(self._step_history)} — step {state.global_step}</span>"
             + "".join(pills)
             + "</div>"
         )
-        html = _PREVIEW_STYLE + html_header + "\n".join(self._html_blocks)
-        wandb.log(
-            {
-                "train/preview/completions_preview": table,
-                "train/preview/completions_preview_image": wandb.Html(html),
-            },
-            step=state.global_step,
-        )
+        html = _PREVIEW_STYLE + html_header + "\n".join(step_blocks)
+        # Don't pass step=state.global_step here — wandb's internal _step
+        # is already way past global_step (each train log call advances it),
+        # and wandb silently drops logs whose explicit step is less than the
+        # current _step. Auto-step gives reliable logging; the actual training
+        # step is preserved in the Table's `step` column and the HTML pill bar.
+        wandb.log({
+            "train/preview/completions_preview": table,
+            "train/preview/completions_preview_image": wandb.Html(html),
+        })
 
 
 # =============================================================================
