@@ -109,6 +109,22 @@ def _refresh_png() -> bool:
     return PNG.stat().st_mtime > before_mtime  # was rewritten
 
 
+def _refresh_html() -> bool:
+    """Regenerate experiments/dd_explainer/<config>/progress.html.
+
+    Without this, the live HTML chart only updates at iter boundaries —
+    stale for the 50-100min an iter takes. Runs in-process via plot_progress.
+    """
+    try:
+        sys.path.insert(0, str(ROOT / "experiments"))
+        from experiment_progress import plot_progress  # type: ignore
+        plot_progress(task="dd_explainer", config_name=CONFIG_NAME)
+        return True
+    except Exception as e:
+        print(f"[pr_updater] html refresh failed: {e}", flush=True)
+        return False
+
+
 def _git_push_png_if_changed() -> bool:
     """Stage png, commit + push only if working-tree differs from HEAD."""
     subprocess.run(["git", "add", str(PNG)], cwd=str(ROOT), check=True)
@@ -163,11 +179,16 @@ def main() -> None:
     print(f"[pr_updater] starting — poll every {POLL_S}s, PR #{PR_NUMBER} on {REPO}")
     while True:
         try:
+            html_ok = _refresh_html()
             png_changed = _refresh_png()
             pushed = _git_push_png_if_changed() if png_changed else False
             narrative = _build_narrative()
             patched = _patch_pr_body(narrative)
-            print(f"[pr_updater] {_ts()} — png_changed={png_changed} pushed={pushed} pr_patched={patched}")
+            print(
+                f"[pr_updater] {_ts()} — html={html_ok} png_changed={png_changed} "
+                f"pushed={pushed} pr_patched={patched}",
+                flush=True,
+            )
         except Exception as e:
             print(f"[pr_updater] tick error: {e}")
         time.sleep(POLL_S)
