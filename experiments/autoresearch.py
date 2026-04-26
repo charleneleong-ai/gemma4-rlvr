@@ -279,7 +279,7 @@ def _gpu_advisor(samples: list[dict], cmd: list[str]) -> None:
 
     print(f"\n[{_ts()}] [gpu_advisor] mean_util={mean_util:.0f}%  "
           f"peak_mem={peak_mem:.1f}/{total:.0f}GB  "
-          f"({len(samples)} samples over run)")
+          f"({len(samples)} samples over run)", flush=True)
 
     hints = []
     if peak_mem / total < GPU_MEM_HEADROOM:
@@ -316,8 +316,8 @@ def _gpu_advisor(samples: list[dict], cmd: list[str]) -> None:
         hints.append(f"  • GPU well-utilised (mean {mean_util:.0f}%) ✓")
 
     if hints:
-        print("\n".join(hints))
-    print()
+        print("\n".join(hints), flush=True)
+    print(flush=True)
 
 # ── Per-iteration execution with triage ────────────────────────────
 
