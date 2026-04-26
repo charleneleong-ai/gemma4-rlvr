@@ -47,25 +47,33 @@ RESULTS = ROOT / "experiments" / "dd_explainer" / "results.jsonl"
 CURRENT = ROOT / "experiments" / "dd_explainer" / "current_run.json"
 LOG_PATH_ENV = "AUTORESEARCH_LOG_PATH"
 
-SCHEDULE: list[tuple[str, list[str], str]] = [
-    ("train_fast", ["--learning-rate", "5.0e-6"],
-     "anchor (lr=5e-6 — eval-gate verification baseline)"),
-    ("train_fast", ["--learning-rate", "5.0e-6", "--num-generations", "8"],
-     "lr=5e-6 + num_generations=8 (tighter advantage estimate)"),
-    ("train_fast", ["--learning-rate", "5.0e-6", "--max-steps", "160"],
-     "lr=5e-6 + max_steps=160 (longer training budget)"),
-    ("train_fast", ["--learning-rate", "5.0e-6", "--warmup-steps", "60"],
-     "lr=5e-6 + warmup=60 (gentler initial ramp, default is 30)"),
-    ("train_fast", ["--learning-rate", "2.0e-6", "--max-steps", "160"],
-     "lr=2e-6 + max_steps=160 (small LR with longer training)"),
-]
+SCHEDULES_DIR = ROOT / "configs" / "schedules"
 
-COMMON_OVERRIDES = [
-    "--max-steps", "80",
-    "--patience", "8",
-    "--plateau-window", "10",
-    "--plateau-delta", "0.05",
-]
+
+def _load_schedule(name: str) -> tuple[list[tuple[str, list[str], str]], list[str]]:
+    """Load a schedule yaml from `configs/schedules/<name>.yaml`.
+
+    Returns (iters, common_overrides) where iters is the same shape as the
+    historical hardcoded SCHEDULE: list of (config_name, cli_overrides, description).
+    """
+    import yaml  # local import — only needed for the autoresearch CLI
+    path = SCHEDULES_DIR / f"{name}.yaml"
+    if not path.exists():
+        available = ", ".join(sorted(p.stem for p in SCHEDULES_DIR.glob("*.yaml")))
+        raise FileNotFoundError(
+            f"Schedule {name!r} not found at {path}. Available: {available or '(none)'}"
+        )
+    data = yaml.safe_load(path.read_text())
+    common = list(data.get("common_overrides") or [])
+    iters_raw = data.get("iters") or []
+    iters: list[tuple[str, list[str], str]] = []
+    for entry in iters_raw:
+        iters.append((
+            entry["config"],
+            list(entry.get("overrides") or []),
+            entry["description"],
+        ))
+    return iters, common
 
 # ── Triage thresholds ──────────────────────────────────────────────
 SLOW_WINDOW = 5            # rolling window for step_time check
@@ -81,7 +89,13 @@ def _ts() -> str:
 
 
 def _baseline_score() -> float:
-    """Best score among prior KEEP/BASELINE rows, else -inf."""
+    """Best train-reward score among prior KEEP/BASELINE rows, else -inf.
+
+    Used by the mid-training triage gate (the `no reward > baseline-1` rule
+    in `_run_with_triage`). Triage compares against in-flight train rewards,
+    so this must stay train-reward-scaled — *not* heldout. The KEEP/DISCARD
+    decision uses heldout via `experiment_progress.promotion_score` instead.
+    """
     if not RESULTS.exists():
         return float("-inf")
     rows = [json.loads(l) for l in RESULTS.read_text().strip().splitlines() if l]
@@ -308,27 +322,36 @@ app = typer.Typer(help="Autonomous overnight GRPO research loop with triage.",
 
 @app.command()
 def main(
-    max_iters: int = typer.Option(len(SCHEDULE), "--max-iters", help="Cap the schedule."),
+    schedule: str = typer.Option(
+        "v1_explore", "--schedule",
+        help=f"Schedule name in configs/schedules/<name>.yaml. "
+             f"Available: {sorted(p.stem for p in SCHEDULES_DIR.glob('*.yaml'))}",
+    ),
+    max_iters: int = typer.Option(0, "--max-iters",
+                                  help="Cap the schedule (0 = run all iters)."),
     skip_baseline: bool = typer.Option(False, "--skip-baseline"),
     pause_s: int = typer.Option(15, "--pause-s",
                                 help="Seconds to wait between runs (lets GPU mem fully free)."),
 ):
-    print(f"[{_ts()}] Autoresearch starting — {min(max_iters, len(SCHEDULE))} iterations.")
+    iters_full, common_overrides = _load_schedule(schedule)
+    cap = max_iters or len(iters_full)
+    print(f"[{_ts()}] Autoresearch starting — schedule={schedule!r}, "
+          f"{min(cap, len(iters_full))}/{len(iters_full)} iterations.")
     _wait_for_train_to_clear()
 
     started = time.monotonic()
-    schedule = SCHEDULE[:max_iters]
+    iters = iters_full[:cap]
     if skip_baseline:
-        schedule = schedule[1:]
-    total = len(schedule)
+        iters = iters[1:]
+    total = len(iters)
 
-    for i, (config, extras, notes) in enumerate(schedule, start=1):
+    for i, (config, extras, notes) in enumerate(iters, start=1):
         baseline = _baseline_score()
         desc = f"[autoresearch {i}/{total}] {notes}"
         cmd = [
             str(PYTHON), str(TRAIN), "train",
             "-c", config, "-d", desc,
-            *COMMON_OVERRIDES, *extras,
+            *common_overrides, *extras,
         ]
         print(f"\n{'='*70}\n[{_ts()}] Iter {i}/{total}: {config} {' '.join(extras)}")
         print(f"  baseline_score so far = {baseline if baseline != float('-inf') else 'none'}")
