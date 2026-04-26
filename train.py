@@ -234,6 +234,14 @@ class CompletionPreviewCallback(TrainerCallback):
     *same* prompt across steps. ~3-5s overhead per logged step on A100.
     """
 
+    _COLUMNS = [
+        "step", "split", "idx", "expected_triggers", "predicted_triggers",
+        "completion_excerpt",
+        "schema_valid", "in_enum", "f1_triggers",
+        "prev_amount_correct", "no_hallucinated_facts",
+        "underpayment_ok", "well_formed", "total",
+    ]
+
     def __init__(
         self,
         train_dataset,
@@ -256,6 +264,12 @@ class CompletionPreviewCallback(TrainerCallback):
         if heldout_dataset is not None:
             for i in range(min(n_heldout, len(heldout_dataset))):
                 self._items.append(("heldout", heldout_dataset[i]))
+        # Single growing buffer of rows across all firings. Each `on_step_end`
+        # invocation appends 1 row per fixed-sample item, then re-logs the full
+        # accumulated Table under the same key. W&B replaces the artifact each
+        # time, so the latest version contains every row and the user can
+        # filter / scrub by the `step` column in the Table panel.
+        self._rows: list[list] = []
 
     def on_step_end(self, args, state, control, **kwargs):
         if self.every <= 0 or state.global_step == 0:
@@ -282,13 +296,6 @@ class CompletionPreviewCallback(TrainerCallback):
             if was_training:
                 model.train()
 
-        table = wandb.Table(columns=[
-            "step", "split", "idx", "expected_triggers", "predicted_triggers",
-            "completion_excerpt",
-            "schema_valid", "in_enum", "f1_triggers",
-            "prev_amount_correct", "no_hallucinated_facts",
-            "underpayment_ok", "well_formed", "total",
-        ])
         for i, ((split, item), comp) in enumerate(zip(self._items, completions)):
             text = comp[0]["content"] if isinstance(comp, list) else str(comp)
             try:
@@ -302,14 +309,18 @@ class CompletionPreviewCallback(TrainerCallback):
                 inp = json.loads(inp)
             scores = score_completion(text, gt, inp)
             excerpt = text.replace("\n", " ⏎ ")[: self.excerpt_chars]
-            table.add_data(
+            self._rows.append([
                 state.global_step, split, i,
                 ", ".join(gt), ", ".join(pred), excerpt,
                 scores["schema_valid"], scores["in_enum"], scores["f1_triggers"],
                 scores["prev_amount_correct"], scores["no_hallucinated_facts"],
                 scores["underpayment_ok"], scores["well_formed"],
                 round(sum(scores.values()), 3),
-            )
+            ])
+        # Re-log the full accumulated Table; each call replaces the previous
+        # artifact with a longer one, so the W&B panel always shows every
+        # firing in one scrubbable view.
+        table = wandb.Table(columns=self._COLUMNS, data=self._rows)
         wandb.log({"train/completions_preview": table})
 
 
