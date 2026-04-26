@@ -1,6 +1,7 @@
 # Claude Code
 .claude-logs/
 .claude/plans
+.claude-sessions/
 
 # Python — bytecode + packaging
 __pycache__/
