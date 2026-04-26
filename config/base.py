@@ -98,6 +98,14 @@ class TrainSettings(BaseModel):
         "/workspace/gemma4_rl/.error_analysis_cache/20260413T075447Z_20260420T075447Z"
     )
 
+    # Periodic completion preview to W&B. Generates completions for a fixed
+    # train + heldout sample every N steps and logs them as a wandb Table so
+    # you can scrub through training and see how outputs evolve. Set
+    # `completion_preview_every=0` to disable. ~3-5s overhead per logged step.
+    completion_preview_every: int = 25
+    completion_preview_n_train: int = 4
+    completion_preview_n_heldout: int = 4
+
 
 class Settings(BaseModel):
     train: TrainSettings = Field(default_factory=TrainSettings)

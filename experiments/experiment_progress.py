@@ -48,11 +48,19 @@ def _task_dir(task: str) -> Path:
     return d
 
 
-def load_results(task: str = DEFAULT_TASK) -> list[dict]:
+def load_results(task: str = DEFAULT_TASK, include_superseded: bool = False) -> list[dict]:
+    """Load result rows for a task. By default, rows with `superseded_by` set
+    are filtered out so charts and aggregations show only canonical entries
+    (the rerun supersedes the original). Pass `include_superseded=True` for
+    bookkeeping that needs the full history (e.g. assigning the next exp #).
+    """
     f = _task_dir(task) / "results.jsonl"
     if not f.exists():
         return []
-    return [json.loads(line) for line in f.read_text().strip().split("\n") if line]
+    rows = [json.loads(line) for line in f.read_text().strip().split("\n") if line]
+    if include_superseded:
+        return rows
+    return [r for r in rows if not r.get("superseded_by")]
 
 
 def _scrape_in_flight_run(task: str) -> dict | None:
@@ -106,12 +114,52 @@ def _scrape_in_flight_run(task: str) -> dict | None:
     }
 
 
-def _decide_status(prior: list[dict], score: float) -> str:
-    """BASELINE for first run; KEEP if better than prior best (KEEP|BASELINE)."""
-    kept = [r["score"] for r in prior if r["status"] in ("KEEP", "BASELINE")]
+def promotion_score(row_or_metrics: dict, fallback_score: float | None = None) -> float | None:
+    """The score used for KEEP/DISCARD comparisons.
+
+    Prefers `metrics.heldout.mean_total` (true generalization signal). Falls
+    back to the train reward (`score`) when eval hasn't run — e.g. EARLY_KILL
+    rows that died before the post-train eval block, or older rows from
+    before the eval gate shipped.
+
+    Accepts either a full row dict (reads its `metrics` + `score`) or a raw
+    metrics dict + `fallback_score`. Returns None if neither is available.
+    """
+    if "metrics" in row_or_metrics or "score" in row_or_metrics:
+        metrics = row_or_metrics.get("metrics") or {}
+        fallback_score = row_or_metrics.get("score")
+    else:
+        metrics = row_or_metrics or {}
+    ho = (metrics.get("heldout") or {})
+    if ho.get("n"):
+        return ho.get("mean_total")
+    return fallback_score
+
+
+def _decide_status(prior: list[dict], score: float, metrics: dict | None = None) -> str:
+    """BASELINE for first run; KEEP if better than prior best (KEEP|BASELINE).
+
+    Promote on **held-out generalization** (`metrics.heldout.mean_total`) when
+    both the new row and at least one prior KEEP/BASELINE row have heldout —
+    that's the apples-to-apples comparison. Otherwise fall back to train
+    reward, never mixing the two scales (mixing would let stale train-scored
+    baselines block heldout-scored runs from ever winning).
+    """
+    kept = [r for r in prior if r["status"] in ("KEEP", "BASELINE")]
     if not kept:
         return "BASELINE"
-    return "KEEP" if score > max(kept) else "DISCARD"
+
+    new_heldout = ((metrics or {}).get("heldout") or {}).get("mean_total")
+    prior_heldout = [
+        ((r.get("metrics") or {}).get("heldout") or {}).get("mean_total")
+        for r in kept
+    ]
+    prior_heldout = [s for s in prior_heldout if s is not None]
+
+    if new_heldout is not None and prior_heldout:
+        return "KEEP" if new_heldout > max(prior_heldout) else "DISCARD"
+    # Fallback: pure train-reward comparison (legacy rows / EARLY_KILL with no eval)
+    return "KEEP" if score > max(r["score"] for r in kept) else "DISCARD"
 
 
 def log_experiment(
@@ -130,9 +178,9 @@ def log_experiment(
     wandb_run_name: str = "",
 ) -> dict:
     """Append a result row. If `status` is None, decide BASELINE/KEEP/DISCARD."""
-    prior = load_results(task)
+    prior = load_results(task, include_superseded=True)
     if status is None:
-        status = _decide_status(prior, score)
+        status = _decide_status(prior, score, metrics=metrics)
 
     entry = {
         "experiment": len(prior),
@@ -155,6 +203,15 @@ def log_experiment(
         fh.write(json.dumps(entry) + "\n")
     print(f"Logged to {f}: #{entry['experiment']} score={score} [{status}] {description}")
     return entry
+
+
+def _green_gradient(t: float) -> str:
+    """Linear interp #b8e6c8 (low heldout) → #1a7a3a (high heldout). t in [0,1]."""
+    t = max(0.0, min(1.0, t))
+    lo = (0xb8, 0xe6, 0xc8)
+    hi = (0x1a, 0x7a, 0x3a)
+    rgb = tuple(int(lo[i] + (hi[i] - lo[i]) * t) for i in range(3))
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
 
 
 _STATUS_STYLE = {
@@ -264,22 +321,27 @@ def _label(r: dict, is_best: bool = False) -> str:
     if summary and len(summary) > 64:
         summary = summary[:61] + "…"
 
-    bits = [f"score={r['score']:.2f}"]
+    bits = [f"train={r['score']:.2f}"]
     if isinstance(m.get("final_kl"), (int, float)):
         bits.append(f"kl={m['final_kl']:.2f}")
     if r.get("steps"):
         bits.append(f"{r['steps']}st")
-    ho = (m.get("heldout") or {})
-    if ho.get("n"):
-        bits.append(f"ho={ho['pass_all']}/{ho['n']}")
-    rg = (m.get("regression") or {})
-    if rg.get("n"):
-        bits.append(f"reg={rg['pass_all']}/{rg['n']}")
 
     lines = [head]
     if summary:
         lines.append(summary)
     lines.append(" · ".join(bits))
+
+    # Eval scores get their own line so the promotion signal stands out.
+    ho = (m.get("heldout") or {})
+    rg = (m.get("regression") or {})
+    eval_bits = []
+    if ho.get("n") and ho.get("mean_total") is not None:
+        eval_bits.append(f"<b>ho={ho['mean_total']:.2f}</b>/16")
+    if rg.get("n") and rg.get("mean_total") is not None:
+        eval_bits.append(f"reg={rg['mean_total']:.2f}/16")
+    if eval_bits:
+        lines.append("eval mean_total · " + " · ".join(eval_bits))
     return "<br>".join(lines)
 
 
@@ -323,7 +385,22 @@ def plot_progress(task: Optional[str] = None) -> Path:
         if in_flight and not any(r["experiment"] == in_flight["experiment"] for r in results):
             results.append(in_flight)
         legend_seen: set[str] = set()
-        best_exp = max(results, key=lambda r: r["score"])["experiment"] if results else None
+        # "Best" follows the promotion rule (heldout mean_total when available,
+        # else train reward). Matches what `_decide_status` uses to pick KEEP.
+        if results:
+            scored = [(r, promotion_score(r)) for r in results]
+            scored = [(r, s) for r, s in scored if s is not None]
+            best_exp = max(scored, key=lambda rs: rs[1])[0]["experiment"] if scored else None
+        else:
+            best_exp = None
+        # Heldout-score range across KEEP/BASELINE rows for marker tinting.
+        keep_heldouts = [
+            ((r.get("metrics") or {}).get("heldout") or {}).get("mean_total")
+            for r in results if r["status"] in ("KEEP", "BASELINE")
+        ]
+        keep_heldouts = [s for s in keep_heldouts if s is not None]
+        ho_min = min(keep_heldouts) if keep_heldouts else None
+        ho_max = max(keep_heldouts) if keep_heldouts else None
 
         for j, r in enumerate(results):
             cfg = _STATUS_STYLE.get(r["status"], _STATUS_STYLE["DISCARD"])
@@ -331,7 +408,21 @@ def plot_progress(task: Optional[str] = None) -> Path:
             show_legend = (i == 1) and r["status"] not in legend_seen
             legend_seen.add(r["status"])
 
-            marker_kwargs = dict(color=cfg["color"], size=cfg["size"], opacity=cfg["opacity"],
+            # KEEP/BASELINE markers tinted by heldout mean_total: deeper green
+            # for higher heldout, light grey-green for the lowest heldout in
+            # range, mid-green when heldout is unavailable. Other statuses
+            # keep their flat status color.
+            marker_color = cfg["color"]
+            if r["status"] in ("KEEP", "BASELINE") and ho_max is not None:
+                ho_val = ((r.get("metrics") or {}).get("heldout") or {}).get("mean_total")
+                if ho_val is not None and ho_max > ho_min:
+                    # Linear interp from #b8e6c8 (light) to #1a7a3a (deep green)
+                    t_norm = (ho_val - ho_min) / (ho_max - ho_min)
+                    marker_color = _green_gradient(t_norm)
+                elif ho_val is None:
+                    marker_color = "#7fbc8c"  # mid-green = "no heldout data"
+
+            marker_kwargs = dict(color=marker_color, size=cfg["size"], opacity=cfg["opacity"],
                                  line=dict(width=1, color=cfg["line_color"]), symbol=cfg["symbol"])
             if is_best:
                 marker_kwargs.update(size=cfg["size"] + 6, line=dict(width=3, color="#27ae60"))
@@ -495,57 +586,172 @@ def plot_progress(task: Optional[str] = None) -> Path:
     except Exception as e:
         print(f"(skipped PNG export: {e})")
 
-    # Eval-metrics chart (held-out + regression pass-rates over experiments).
-    plot_eval_progress(task)
+    # Eval-metrics chart appended to the same progress.html so train + eval
+    # live in one page. plotly.js is already loaded by the main fig above, so
+    # the second fig embeds with include_plotlyjs=False. A short description
+    # block explains what mean_total is + cites the heldout technique.
+    eval_fig, _ = _build_eval_fig(tasks)
+    if eval_fig is not None:
+        with open(html, "a") as fh:
+            fh.write(eval_fig.to_html(include_plotlyjs=False, full_html=False))
+            fh.write(_eval_description_html())
+        print(f"Appended eval chart to {html}")
     return html
 
 
-def plot_eval_progress(task: Optional[str] = None) -> Path:
-    """Render `eval_progress.html`: held-out + regression pass-rate over time.
+def _eval_description_html() -> str:
+    """Static explainer block appended below the eval chart."""
+    return """
+<style>
+  .eval-explainer { max-width: 1200px; margin: 24px auto 48px; padding: 20px 28px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #222; background: #fafbfc; border: 1px solid #e1e4e8; border-radius: 6px;
+    line-height: 1.55; }
+  .eval-explainer h3 { margin-top: 0; color: #1a7a3a; font-size: 15px; }
+  .eval-explainer h4 { margin: 18px 0 6px; font-size: 13px; color: #444; }
+  .eval-explainer code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px;
+    font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }
+  .eval-explainer ul { margin: 6px 0; padding-left: 22px; font-size: 13px; }
+  .eval-explainer a { color: #1a7a3a; }
+  .eval-explainer .formula { background: #fff; padding: 8px 12px; border-left: 3px solid #27ae60;
+    font-family: 'SF Mono', Monaco, monospace; font-size: 12px; margin: 8px 0; }
+</style>
+<div class="eval-explainer">
+  <h3>What you're looking at: held-out generalization for an RLVR policy</h3>
+  <p>Each iter trains a GRPO LoRA on synthetic <code>direct_debit_explainer</code>
+  prompts. After training, the frozen policy is evaluated at <code>temperature=0</code>
+  on two distinct splits the model never saw during training. The KEEP / DISCARD
+  promotion decision uses <strong><code>heldout.mean_total</code></strong> rather
+  than train reward, so we promote on generalization, not on what the policy
+  was directly optimized against.</p>
 
-    Only experiments whose row has a `metrics["heldout"]` or
-    `metrics["regression"]` block are plotted. Empty if the eval gate
-    hasn't run yet.
+  <h4>mean_total — the per-rubric sum</h4>
+  <p>Each of the 7 verifiable rewards from <code>dd_explainer_rewards.py</code> scores
+  one rubric. <code>mean_total</code> is the row-mean of their sum:</p>
+  <div class="formula">mean_total = mean<sub>row</sub>(
+    schema_valid + in_enum + f1_triggers + prev_amount_correct
+    + no_hallucinated_facts + underpayment_ok + well_formed )</div>
+  <p>Range is <code>[-9.5, 16.0]</code> in principle (worst-case all rubrics return
+  their negative penalty; best-case all hit their max). On the current dataset,
+  random-init tends to sit near <code>~6</code>, trained policies climb past
+  <code>~8.5</code>. Higher = better. Solid green diamond line on the chart.</p>
+
+  <h4>pass_all_pct — the joint-AND pass rate (option-A semantics)</h4>
+  <p>Fraction of rows where <em>every</em> rubric clears its pass threshold. A
+  defensive guardrail (<code>prev_amount_correct &ge; 0</code>) counts as pass — only
+  active hallucinations (<code>-3</code>) fail it — because the prompt never
+  asks the model to cite previous £ amounts, so requiring <code>+2</code> would
+  be unreachable. Dotted blue (held-out) and purple (regression) lines.</p>
+
+  <h4>The two splits</h4>
+  <ul>
+    <li><strong>held-out (val):</strong> 1000 IID rows from the synthetic dataset,
+    excluded from training (seed=42). Catches prompt overfitting + reward hacking
+    that's invisible on the train distribution. ~18% of the 5500-row dataset
+    &rarr; ±1.6% std-err on pass-rate.</li>
+    <li><strong>regression (test):</strong> 100 of 187 known-failed real-prod traces
+    from <code>.error_analysis_cache/</code>. The "did we actually fix the failure
+    modes that motivated the project" signal — never touched during HP search.</li>
+  </ul>
+
+  <h4>Why heldout for promotion (not train reward)</h4>
+  <p>RL with verifiable rewards is uniquely vulnerable to <em>reward hacking</em>
+  — the policy finds outputs that maximise the verifier without satisfying the
+  spirit of the rubric. Train reward is computed on the same prompts the policy
+  was just gradient-stepped against, so a wrapper that maximises train reward
+  alone preferentially promotes hacks. Held-out evaluation breaks this loop:
+  same rubrics, prompts the model has never been pushed against. Standard
+  practice in RLHF/RLVR — see references below.</p>
+
+  <h4>Why <code>mean_total</code> for promotion, <code>pass_all_pct</code> for reporting</h4>
+  <p>The two metrics answer different questions. <strong><code>mean_total</code></strong>
+  uses gradient signal from every rubric on every row (1000 rows × 7 rubrics =
+  7000 numeric values), so it cleanly separates similar policies, catches partial
+  regressions, and gives the autoresearch loop a continuous comparator. It
+  answers <em>"is this policy better"</em>. <strong><code>pass_all_pct</code></strong>
+  collapses each row to a single pass/fail bit (~85% information loss) and is
+  bottlenecked by the worst rubric — currently <code>well_formed</code> caps it
+  at ~40%. It answers <em>"would I ship this"</em> — the right metric for product
+  reporting, the wrong metric for promotion ranking.</p>
+
+  <h4>References</h4>
+  <ul>
+    <li>Ouyang et al. 2022, <em>Training Language Models to Follow Instructions
+    with Human Feedback</em> (InstructGPT) —
+    <a href="https://arxiv.org/abs/2203.02155">arXiv:2203.02155</a>.
+    Establishes the held-out prompt-set evaluation pattern for RLHF policies.</li>
+    <li>Stiennon et al. 2020, <em>Learning to summarize from human feedback</em>
+    — <a href="https://arxiv.org/abs/2009.01325">arXiv:2009.01325</a>.
+    Earlier formal use of held-out prompt eval to detect reward over-optimization.</li>
+    <li>Lambert et al. 2024, <em>T&uuml;lu 3: Pushing Frontiers in Open Language
+    Model Post-Training</em> —
+    <a href="https://arxiv.org/abs/2411.15124">arXiv:2411.15124</a>.
+    Coins "RLVR" (Reinforcement Learning with Verifiable Rewards) and
+    formalises the held-out + regression split for verifier-based RL.</li>
+    <li>Shao et al. 2024, <em>DeepSeekMath: Pushing the Limits of Mathematical
+    Reasoning in Open Language Models</em> —
+    <a href="https://arxiv.org/abs/2402.03300">arXiv:2402.03300</a>.
+    Introduces GRPO and reports held-out math-bench accuracy as the policy's
+    promotion criterion.</li>
+    <li>Gao, Schulman, Hilton 2023, <em>Scaling Laws for Reward Model
+    Overoptimization</em> — <a href="https://arxiv.org/abs/2210.10760">arXiv:2210.10760</a>.
+    The canonical paper on RL reward hacking; quantifies why train-reward
+    can't be trusted and held-out is needed.</li>
+  </ul>
+</div>
+"""
+
+
+def _build_eval_fig(tasks: list[str]):
+    """Build the held-out + regression pass-rate figure. Returns (fig, any_data).
+
+    Returns (None, False) if no task has any eval data yet.
     """
-    tasks = [task] if task else sorted(
-        d.name for d in EXPERIMENTS_DIR.iterdir() if d.is_dir() and (d / "results.jsonl").exists()
-    )
-    tasks = [t for t in tasks if load_results(t)]
-    if not tasks:
-        return Path()
-
     fig = make_subplots(
         rows=len(tasks), cols=1, vertical_spacing=0.18,
-        subplot_titles=[f"{t} — eval pass-rates" for t in tasks],
+        subplot_titles=[f"{t} — eval mean_total + pass-rates" for t in tasks],
     )
     any_data = False
     for i, t in enumerate(tasks, 1):
         rows = sorted(load_results(t), key=lambda r: r["experiment"])
-        for series_key, label, color in (
-            ("heldout", "held-out (generalization)", "#3498db"),
-            ("regression", "regression (prior failures)", "#9b59b6"),
+        for series_key, label, color, axis in (
+            ("heldout_mean", "held-out mean_total", "#27ae60", "y2"),
+            ("heldout", "held-out pass_all (%)", "#3498db", "y"),
+            ("regression", "regression pass_all (%)", "#9b59b6", "y"),
         ):
             xs, ys, hover = [], [], []
             for r in rows:
-                ev = (r.get("metrics") or {}).get(series_key) or {}
+                ev_key = "heldout" if series_key == "heldout_mean" else series_key
+                ev = (r.get("metrics") or {}).get(ev_key) or {}
                 if not ev.get("n"):
                     continue
-                pct = ev.get("pass_all_pct", 0)
+                if series_key == "heldout_mean":
+                    val = ev.get("mean_total", 0)
+                    hover.append(
+                        f"<b>E{r['experiment']} — held-out</b><br>"
+                        f"mean_total = {val:.2f}<br>"
+                        f"pass_all = {ev.get('pass_all', 0)}/{ev['n']}"
+                    )
+                else:
+                    val = ev.get("pass_all_pct", 0)
+                    hover.append(
+                        f"<b>E{r['experiment']} — {label}</b><br>"
+                        f"pass_all = {ev.get('pass_all', 0)}/{ev['n']} ({val:.1f}%)<br>"
+                        f"mean_total = {ev.get('mean_total', 0):.2f}"
+                    )
                 xs.append(r["experiment"])
-                ys.append(pct)
-                hover.append(
-                    f"<b>E{r['experiment']} — {label}</b><br>"
-                    f"pass_all = {ev.get('pass_all', 0)}/{ev['n']} ({pct:.1f}%)<br>"
-                    f"mean_total = {ev.get('mean_total', 0):.2f}"
-                )
+                ys.append(val)
             if xs:
                 any_data = True
                 fig.add_trace(go.Scatter(
                     x=xs, y=ys, mode="lines+markers", name=label,
-                    line=dict(color=color, width=2),
-                    marker=dict(size=10, color=color, line=dict(width=1, color="white")),
+                    line=dict(color=color, width=2,
+                              dash="solid" if series_key == "heldout_mean" else "dot"),
+                    marker=dict(size=10, color=color, line=dict(width=1, color="white"),
+                                symbol="diamond" if series_key == "heldout_mean" else "circle"),
                     hovertext=hover,
                     hovertemplate="%{hovertext}<extra></extra>",
+                    yaxis=axis,
                     legendgroup=series_key, showlegend=(i == 1),
                 ), row=i, col=1)
         fig.update_yaxes(title_text="pass_all (%)", range=[0, 100],
@@ -553,12 +759,28 @@ def plot_eval_progress(task: Optional[str] = None) -> Path:
         fig.update_xaxes(title_text="Experiment #", dtick=1,
                          gridcolor="#f4f4f4", row=i, col=1)
 
+    if not any_data:
+        return None, False
+
+    # Secondary y-axis on the right for mean_total (rubric scale, not %)
     fig.update_layout(
-        title=dict(text="GRPO Eval Progress (held-out + regression)",
-                   font=dict(size=22, color="#222"),
-                   x=0.02, xanchor="left", y=0.985, yanchor="top"),
+        yaxis2=dict(title="mean_total (Σ 7 rubric scores, max 16.0)",
+                    overlaying="y", side="right", gridcolor="rgba(0,0,0,0)"),
+        title=dict(
+            text=(
+                "<b>GRPO Eval Progress</b> · promotion uses held-out "
+                "<code>mean_total</code> (= mean<sub>row</sub>(Σ 7 rubrics))"
+                "<br><span style='font-size:11px;color:#666'>"
+                "held-out (1000 IID rows excluded from training) · "
+                "regression (100 known-failed prod traces) · "
+                "see explainer + references below"
+                "</span>"
+            ),
+            font=dict(size=18, color="#222"),
+            x=0.02, xanchor="left", y=0.98, yanchor="top",
+        ),
         height=520 * len(tasks),
-        margin=dict(t=110, b=60, l=80, r=80),
+        margin=dict(t=130, b=60, l=80, r=80),
         template="plotly_white",
         paper_bgcolor="white", plot_bgcolor="white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
@@ -568,12 +790,7 @@ def plot_eval_progress(task: Optional[str] = None) -> Path:
         hoverlabel=dict(align="left", bgcolor="white", bordercolor="#bbb",
                         font=dict(size=11), namelength=-1),
     )
-
-    out_dir = _task_dir(tasks[0]) if len(tasks) == 1 else EXPERIMENTS_DIR
-    html = out_dir / "eval_progress.html"
-    fig.write_html(str(html))
-    print(f"Saved {html}{' (no eval data yet)' if not any_data else ''}")
-    return html
+    return fig, True
 
 
 # ── CLI ─────────────────────────────────────────────────────────────
