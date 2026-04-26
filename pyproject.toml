@@ -11,7 +11,9 @@ dependencies = [
     "numpy",
     "pillow",
     "bitsandbytes",
-    "transformers>=5.5.0",
+    # 5.5.0 has a regression in apply_chat_template that crashes on string
+    # `content` fields (assumes multimodal list-of-dicts). 5.6.0+ tolerates both.
+    "transformers>=5.6.0",
     "tokenizers",
     "trl>=0.28.0",
     "peft",
@@ -21,6 +23,14 @@ dependencies = [
     "unsloth-zoo[base] @ git+https://github.com/unslothai/unsloth-zoo",
     "plotly>=6.0.0",
     "nvitop",
+    "python-dotenv",
+    "pydantic>=2.0",
+    "hydra-core",
+    "typer",
+    "pandas",
+    "wandb",
+    "safetensors",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -32,14 +42,26 @@ dev = [
 ]
 
 [tool.uv]
-# unsloth-zoo pins trl<0.24.0 but the notebook installs trl>=0.28.0 with --no-deps;
-# override here to match that intent.
+# unsloth-zoo pins trl<0.24.0 and transformers<5.6.0 but the notebook installs
+# both newer with --no-deps; override here to match that intent. transformers
+# 5.5.0 has an apply_chat_template regression on string `content` — 5.6.0+ fixes
+# it without breaking unsloth's runtime path.
 override-dependencies = [
     "trl>=0.28.0",
+    "transformers>=5.6.0",
 ]
 # Unsloth builds from source — skip binary resolution for these
 no-binary-package = ["unsloth", "unsloth-zoo"]
+# This is a script-style project — train.py is the entry point, not a library.
+# Skip wheel-building for the project itself; uv just resolves deps into .venv.
+package = false
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# unsloth + unsloth-zoo are installed from git refs (see project.dependencies).
+# Hatchling refuses direct references by default — flip this on so `uv sync`
+# / `pip install -e .` can resolve them.
+allow-direct-references = true
