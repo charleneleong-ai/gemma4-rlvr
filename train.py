@@ -221,6 +221,64 @@ class WandbMetricDefsCallback(TrainerCallback):
             wandb.log(out)
 
 
+_PREVIEW_STYLE = """
+<style>
+.cp-block { margin: 14px 0; padding: 12px 14px; border-left: 4px solid #4a90e2;
+            background: #f7f9fc; border-radius: 4px; font-family: -apple-system, sans-serif; font-size: 13px; }
+.cp-head { font-weight: 600; color: #2c3e50; margin: 0 0 8px 0; font-size: 14px; }
+.cp-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.cp-col h5 { margin: 0 0 4px 0; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: .04em; }
+.cp-col pre { background: white; padding: 8px; border: 1px solid #e5e7eb; border-radius: 3px;
+              font-size: 12px; max-height: 220px; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-word; }
+.cp-tag-gt { color: #047857; font-weight: 600; }
+.cp-tag-pred { color: #c2410c; font-weight: 600; }
+.cp-tag-match { color: #047857; font-weight: 600; }
+.cp-tag-miss { color: #b91c1c; font-weight: 600; text-decoration: line-through; }
+.cp-tag-extra { color: #c2410c; font-weight: 600; font-style: italic; }
+.cp-scores { margin-top: 6px; font-size: 11px; color: #4b5563; font-family: monospace; }
+</style>
+"""
+
+
+def _render_preview_block(*, step: int, split: str, idx: int,
+                          input_text: str, gt: list, pred: list,
+                          completion: str, scores: dict, total: float) -> str:
+    """One styled side-by-side card per sample, accumulated into the HTML panel."""
+    import html as _html
+    gt_set, pred_set = set(gt), set(pred)
+    gt_html = ", ".join(
+        f'<span class="cp-tag-{"match" if t in pred_set else "miss"}">{_html.escape(t)}</span>'
+        for t in gt
+    ) or "<em>(none)</em>"
+    pred_html = ", ".join(
+        f'<span class="cp-tag-{"match" if t in gt_set else "extra"}">{_html.escape(t)}</span>'
+        for t in pred
+    ) or "<em>(none)</em>"
+    score_summary = " · ".join(f"{k}={v}" for k, v in scores.items())
+    return f"""
+<div class="cp-block">
+  <p class="cp-head">step {step} — {split}#{idx} — total <b>{total}</b>/14</p>
+  <div class="cp-grid">
+    <div class="cp-col">
+      <h5>Input</h5>
+      <pre>{_html.escape((input_text or "")[:1200])}</pre>
+    </div>
+    <div class="cp-col">
+      <h5>Expected triggers (gt)</h5>
+      <p>{gt_html}</p>
+      <h5 style="margin-top:10px">Predicted triggers</h5>
+      <p>{pred_html}</p>
+    </div>
+    <div class="cp-col">
+      <h5>Completion</h5>
+      <pre>{_html.escape((completion or "")[:1200])}</pre>
+    </div>
+  </div>
+  <p class="cp-scores">{_html.escape(score_summary)}</p>
+</div>
+"""
+
+
 class CompletionPreviewCallback(TrainerCallback):
     """Every `every_n_steps`, generate completions for a fixed sample of train +
     held-out prompts and log them to W&B as a table.
@@ -271,6 +329,11 @@ class CompletionPreviewCallback(TrainerCallback):
         # time, so the latest version contains every row and the user can
         # filter / scrub by the `step` column in the Table panel.
         self._rows: list[list] = []
+        # Parallel HTML buffer. Each step appends a styled side-by-side card
+        # block (input | gt vs pred | completion) per fixed sample. Re-logged
+        # as wandb.Html under train/completions_preview_html for a visual
+        # scanning view that complements the Table's filter/sort affordances.
+        self._html_blocks: list[str] = []
 
     def on_step_end(self, args, state, control, **kwargs):
         if self.every <= 0 or state.global_step == 0:
@@ -337,11 +400,23 @@ class CompletionPreviewCallback(TrainerCallback):
                 scores["underpayment_ok"], scores["well_formed"],
                 total,
             ])
+            # Build a side-by-side card for this sample. The whole HTML buffer
+            # is re-rendered each firing, so the latest panel always contains
+            # every step's blocks in chronological order.
+            self._html_blocks.append(_render_preview_block(
+                step=state.global_step, split=split, idx=i,
+                input_text=input_text, gt=gt, pred=pred,
+                completion=text, scores=scores, total=total,
+            ))
         # Re-log the full accumulated Table; each call replaces the previous
         # artifact with a longer one, so the W&B panel always shows every
         # firing in one scrubbable view.
         table = wandb.Table(columns=self._COLUMNS, data=self._rows)
-        wandb.log({"train/completions_preview": table})
+        html = _PREVIEW_STYLE + "\n".join(self._html_blocks)
+        wandb.log({
+            "train/completions_preview": table,
+            "train/completions_preview_html": wandb.Html(html),
+        })
 
 
 # =============================================================================
