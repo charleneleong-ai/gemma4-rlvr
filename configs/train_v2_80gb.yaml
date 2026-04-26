@@ -1,0 +1,69 @@
+# v2 baseline preset — A100 PCIe 80GB.
+#
+# Cumulative changes vs train_fast (40GB):
+#   - load_in_4bit: false   (memory headroom on 80GB; cleaner gradient signal)
+#   - lora_rank: 128        (was 64 — minor capacity bump on a structured task)
+#   - max_seq_length: 8192  (was 4096 — full coverage of long regression traces)
+#   - num_generations: 16   (was 4-8 — tighter GRPO advantage estimates, the main quality lever)
+#   - eval_batch_size: 64   (was 32 — heldout halves to ~13min; if regression OOMs at 64, drop to 32)
+#
+# Step time: expect ~75-95s on PCIe 80GB (vs ~70-90s on SXM4 40GB). The PCIe form-factor
+# and 300W TDP cap mean training is ~5-10% slower per step than SXM4; the win is
+# eval throughput + GRPO group size, not raw compute speed.
+#
+# See docs/v2-80gb-migration.md for the migration plan + sweep schedule.
+
+defaults:
+  - train
+  - _self_
+
+train:
+  # Memory: drop 4-bit, larger LoRA, longer context
+  load_in_4bit: false
+  lora_rank: 128
+  max_seq_length: 8192
+  max_completion_length: 1024
+
+  # GRPO: larger group → tighter advantage estimates
+  batch_size: 4              # rollout batch — 4*16=64 rollouts/step (was 4*8=32 on v1 best)
+  grad_accum: 2              # effective grad-update batch = 8
+  num_generations: 16
+
+  # Optimizer: keep v1-best defaults until sweep 2 explores
+  learning_rate: 1.0e-5
+  beta: 0.04
+  weight_decay: 0.001
+
+  # Eval: bigger batches now fit on 80GB
+  eval_batch_size: 64
+  eval_heldout_n: 1000
+  eval_regression_n: 100
+
+  # Schedule: short autoresearch iter (extend via CLI for full runs)
+  max_steps: 80
+  warmup_steps: 30
+  save_steps: 50
+  seed: 42
+
+  # Early stopping armed (matches v1 sweep settings)
+  patience: 8
+  plateau_window: 10
+  plateau_delta: 0.05
+
+  # Periodic completion preview to W&B
+  completion_preview_every: 25
+  completion_preview_n_train: 4
+  completion_preview_n_heldout: 4
+
+wandb:
+  project: ${oc.env:WANDB_PROJECT, "gemma4-rlvr"}
+  entity: ${oc.env:WANDB_ENTITY, "chaleong"}
+  mode: online
+  tags: ["gemma4", "rlvr", "dd-explainer", "e4b"]
+  notes: >-
+    Hardware: A100 PCIe 80GB (vast.ai). Stack changes vs prior 40GB runs:
+    softened well_formed rubric (rubric_version=2026-04-26-soften-well-formed),
+    held-out-based promotion (mean_total instead of train reward),
+    option-A pass_all (prev_amount_correct >= 0 counts as pass),
+    eval-to-wandb wiring, completion preview callback.
+    See docs/v2-80gb-migration.md for the migration plan.
