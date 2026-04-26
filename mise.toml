@@ -92,6 +92,16 @@ CFG="${1:-train_v2_80gb}"
 .venv/bin/python -c "from experiments.experiment_progress import plot_progress; plot_progress(\\"dd_explainer\\", config_name=\\"$CFG\\")"
 """
 
+[tasks.serve]
+description = "Serve experiments/ over HTTP for viewing progress.html. Default port 8080. Use vast.ai port-forward or SSH `-L 8080:localhost:8080`."
+run = """
+PORT="${1:-8080}"
+echo "→ http://localhost:$PORT/dd_explainer/<config_name>/progress.html"
+echo "→ e.g.   http://localhost:$PORT/dd_explainer/train_v2_80gb/progress.html"
+echo ""
+cd experiments && .venv/../.venv/bin/python -m http.server "$PORT" --bind 0.0.0.0
+"""
+
 [tasks.tail]
 description = "Follow the most recent autoresearch / smoke log (interactive — Ctrl-C to detach)."
 run = """
