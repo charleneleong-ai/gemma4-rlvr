@@ -28,8 +28,8 @@ iters:
     description: "lr=5e-6 (v1 best LR, transferred)"
 
   - config: train_v2_80gb
-    overrides: ["--num-generations", "24"]
-    description: "num_generations=24 (push GRPO group size further)"
+    overrides: ["--num-generations", "8"]
+    description: "num_generations=8 (halve GRPO group size — more diverse prompts per batch)"
 
   - config: train_v2_80gb
     overrides: ["--beta", "0.02"]

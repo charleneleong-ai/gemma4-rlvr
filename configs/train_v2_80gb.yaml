@@ -54,7 +54,7 @@ train:
   plateau_delta: 0.05
 
   # Periodic completion preview to W&B
-  completion_preview_every: 25
+  completion_preview_every: 5
   completion_preview_n_train: 4
   completion_preview_n_heldout: 4
 
