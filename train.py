@@ -236,8 +236,14 @@ _PREVIEW_STYLE = """
 .cp-tag-miss { color: #b91c1c; font-weight: 600; text-decoration: line-through; }
 .cp-tag-extra { color: #c2410c; font-weight: 600; font-style: italic; }
 .cp-scores { margin-top: 6px; font-size: 11px; color: #4b5563; font-family: monospace; }
-.cp-header-summary { font-size: 13px; color: #374151; padding: 8px 12px; background: #eef2ff;
-                     border-radius: 4px; margin: 0 0 12px 0; font-family: -apple-system, sans-serif; }
+.cp-header-summary { font-size: 13px; color: #374151; padding: 10px 12px; background: #eef2ff;
+                     border-radius: 4px; margin: 0 0 12px 0; font-family: -apple-system, sans-serif;
+                     display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cp-step-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+.cp-step-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; background: #ddd6fe;
+                color: #4c1d95; font-size: 12px; font-weight: 600; font-family: monospace; }
+.cp-step-pill.cp-step-latest { background: #4c1d95; color: white; box-shadow: 0 1px 3px rgba(76, 29, 149, .3); }
+.cp-step-arrow { color: #9ca3af; font-weight: 600; }
 </style>
 """
 
@@ -415,12 +421,21 @@ class CompletionPreviewCallback(TrainerCallback):
         # every firing in one view. Two namespaces: train/preview/* for the
         # filterable Table, train/images/* for the visual HTML cards.
         table = wandb.Table(columns=self._COLUMNS, data=self._rows)
-        # Step-count header so the HTML panel shows accumulation at a glance.
+        # Visual step bar at the top of the HTML panel — pill chips for each
+        # firing, latest highlighted. Accumulation is at-a-glance instead of
+        # in a text summary.
         firing_steps = sorted({row[0] for row in self._rows})
+        pills = []
+        for i, s in enumerate(firing_steps):
+            cls = "cp-step-pill cp-step-latest" if s == state.global_step else "cp-step-pill"
+            pills.append(f"<span class='{cls}'>step {s}</span>")
+            if i < len(firing_steps) - 1:
+                pills.append("<span class='cp-step-arrow'>→</span>")
         html_header = (
-            f"<p class='cp-header-summary'><b>{len(firing_steps)}</b> preview firings"
-            f" · steps: {', '.join(map(str, firing_steps))}"
-            f" · latest: <b>{state.global_step}</b></p>"
+            "<div class='cp-header-summary'>"
+            f"<span class='cp-step-label'>{len(firing_steps)} firings</span>"
+            + "".join(pills)
+            + "</div>"
         )
         html = _PREVIEW_STYLE + html_header + "\n".join(self._html_blocks)
         wandb.log({
