@@ -45,28 +45,36 @@ If `step_time` per-iter logs jump above ~100s sustained on the new hardware, sus
 
 ## Pre-migration checklist
 
-- [x] **Commit + push the in-flight changes** on `feat/auto-research-loop` — done (4 commits pushed 2026-04-26)
+- [x] **Commit + push the in-flight changes** on `feat/auto-research-loop` — done (5 commits pushed 2026-04-26)
 - [x] **PR #5** (`refactor/soften-well-formed-rubric`) merged to `main` — done; rubric softening is upstream
-- [ ] **Confirm in-flight work finished** on the current 40GB box:
-  - `ps -ef | grep -E "rerun_top5_remaining|retro_eval_optA"` — both should be gone
-  - `experiments/dd_explainer/results.jsonl` should have row `#23` (in-flight #13 retrain; #22 from #5 retrain already there)
-  - Retro-eval should have populated heldout `metrics` for `#20` only with `rubric_version="2026-04-26-soften-well-formed"` (surgical mode — see scoreboard note below)
+- [x] **In-flight work finished** on the 40GB box (2026-04-26 14:09 UTC):
+  - Both `rerun_top5_remaining.sh` (PID 340857) and `retro_eval_optA` (PID 349153) exited cleanly
+  - `experiments/dd_explainer/results.jsonl` populated through row `#23`
+  - Surgical retro-eval patched `#20` with `rubric_version="2026-04-26-soften-well-formed"`
+  - GPU idle (4 MiB / 0% util) — ready for migration
 - [ ] **Push final progress.html screenshot** so the chart history is in git (`docs/autoresearch_progress.png`)
-- [ ] **Note the v1 anchor metric in the scoreboard below** so v2 has a comparison point
 
 ### v1 final scoreboard
 
-Surgical mode: only **#20** (the v1 best by train reward) gets re-evaluated under the new rubric, to anchor v1↔v2 comparison without burning ~3 hrs on snapshots whose individual numbers don't change the v2 plan. Other rows kept for context.
+Surgical retro-eval mode: only **#20** (the v1 best by train reward) was re-evaluated under the new rubric, to anchor v1↔v2 comparison without burning ~3 hrs. Other adapter snapshots remain on disk under `gemma_4_lora/exp_<N>/` for future expansion.
 
-| exp | config | train score | heldout mean_total (new rubric) | rubric_version |
-|---|---|---|---|---|
-| #19 | baseline (`train_fast`) | 11.500 | — (snapshot exists, not retro-eval'd) | — |
-| **#20** | **`num_generations=8`** | **14.000** | **TBD ← v1 ANCHOR** | `2026-04-26-soften-well-formed` |
-| #21 | `lr=5e-6 + num_gen=8` | 13.875 | — (snapshot exists, not retro-eval'd) | — |
-| #22 | `beta=0.02` | (filled by #5 retrain) | natural eval ran on OLD rubric | (pre-soften) |
-| #23 | `lr=2e-6` | (filled by #13 retrain) | natural eval on NEW rubric | `2026-04-26-soften-well-formed` |
+| exp | config | train score | heldout mean_total | heldout pass_all_pct | rubric_version |
+|---|---|---|---|---|---|
+| #19 | baseline (`train_fast`) | 11.500 | — | — | (snapshot only) |
+| **#20** | **`num_generations=8` ← v1 ANCHOR** | **14.000** | **8.536** | **14.1%** (141/1000) | `2026-04-26-soften-well-formed` |
+| #21 | `lr=5e-6 + num_gen=8` | 13.875 | — | — | (snapshot only) |
+| #22 | `beta=0.02` (#5 retrain) | (in row) | (natural eval — old rubric) | — | (pre-soften) |
+| #23 | `lr=2e-6` (#13 retrain) | 10.938 | 8.276 | 9.6% | `2026-04-26-soften-well-formed` |
 
-**To fill in the gaps later** (if v2 anchor surprises you and you want a finer v1 picture): edit `EXPS` in `/tmp/retro_eval_optA.py` to expand the list, snapshots are under `gemma_4_lora/exp_<N>/`. ~40 min per snapshot.
+**Headline v1-result observation:** `pass_all_pct` jumped from 0/1000 → 141/1000 (14.1%) on #20 under option-A semantics. The softened `well_formed` rubric also moved `mean_total` from 8.49 → 8.536 (small — this snapshot trained against the old binary AND, so it was already optimised for the strict version).
+
+**v2 anchor needs to beat: `mean_total > 8.536` and/or `pass_all_pct > 14.1%`** on heldout to declare a win. If the v2 stack on 80gb hardware doesn't clear this, debug rubric_version mismatch first before assuming the v2 changes themselves regressed.
+
+**Caveats from the retro-eval run:**
+- Regression eval on #20 came back with n=52 (not 100) — some rows skipped or OOM'd at bs=16, and `mean_total=0.925` looks suspiciously low. Worth checking `_run_regression` behaviour on the new box before trusting regression numbers.
+- `prev_amount_correct` still fires positively on only 1/1000 rows — the rubric is effectively dead under both old and new logic. The "change the prompt to ask the model to cite previous £ amounts" follow-up (open-question #1 below) is the real lever.
+
+**Heldout-based promotion validated end-to-end:** #23 (heldout 8.276) was correctly DISCARDed against the heldout anchor 8.536, even though its train reward (10.94) was meaningful. The new `_decide_status` ladder works as designed.
 
 ---
 
