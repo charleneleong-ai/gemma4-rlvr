@@ -235,7 +235,8 @@ class CompletionPreviewCallback(TrainerCallback):
     """
 
     _COLUMNS = [
-        "step", "split", "idx", "expected_triggers", "predicted_triggers",
+        "step", "split", "idx",
+        "input_excerpt", "expected_triggers", "predicted_triggers",
         "completion_excerpt",
         "schema_valid", "in_enum", "f1_triggers",
         "prev_amount_correct", "no_hallucinated_facts",
@@ -311,9 +312,27 @@ class CompletionPreviewCallback(TrainerCallback):
             scores = score_completion(text, gt, inp)
             excerpt = text.replace("\n", " ⏎ ")[: self.excerpt_chars]
             total = round(sum(scores.values()), 3)
+            # Pull the user-message text out of the chat-format prompt so the
+            # Table shows what the model was asked, not just what it answered.
+            # build_chat_messages produces list-of-block content; legacy cached
+            # rows may still be plain strings.
+            user_msg = next(
+                (m for m in item["prompt"] if m.get("role") == "user"), None,
+            )
+            if user_msg is None:
+                input_text = ""
+            else:
+                content = user_msg.get("content")
+                if isinstance(content, list):
+                    input_text = " ".join(
+                        c.get("text", "") for c in content if c.get("type") == "text"
+                    )
+                else:
+                    input_text = str(content or "")
+            input_excerpt = input_text.replace("\n", " ⏎ ")[: self.excerpt_chars]
             self._rows.append([
                 state.global_step, split, i,
-                ", ".join(gt), ", ".join(pred), excerpt,
+                input_excerpt, ", ".join(gt), ", ".join(pred), excerpt,
                 scores["schema_valid"], scores["in_enum"], scores["f1_triggers"],
                 scores["prev_amount_correct"], scores["no_hallucinated_facts"],
                 scores["underpayment_ok"], scores["well_formed"],
