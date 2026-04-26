@@ -25,8 +25,11 @@ train:
   max_completion_length: 1024
 
   # GRPO: larger group → tighter advantage estimates
-  batch_size: 4              # rollout batch — 4*16=64 rollouts/step (was 4*8=32 on v1 best)
-  grad_accum: 2              # effective grad-update batch = 8
+  # Constraint: (batch_size * grad_accum) % num_generations == 0
+  # 8 * 2 = 16 effective, divisible by num_generations=16. One unique prompt
+  # per grad step with 16 rollouts (vs v1's 1 prompt × 8 rollouts).
+  batch_size: 8
+  grad_accum: 2
   num_generations: 16
 
   # Optimizer: keep v1-best defaults until sweep 2 explores

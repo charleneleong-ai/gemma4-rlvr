@@ -328,16 +328,23 @@ HUMAN_PROMPT_TEMPLATE = """<latest_DD_change>
 """
 
 
-def build_chat_messages(pin: DDExplainerPromptInput) -> List[Dict[str, str]]:
-    """Render the full direct_debit_explainer prompt into chat messages."""
+def build_chat_messages(pin: DDExplainerPromptInput) -> List[Dict[str, object]]:
+    """Render the full direct_debit_explainer prompt into chat messages.
+
+    Content is wrapped as a list of typed blocks (`[{"type": "text", "text": ...}]`)
+    rather than a bare string. Both forms render identically through Gemma 4's
+    chat template, but transformers >=5.5.0's `apply_chat_template(tokenize=True)`
+    iterates string content as if it were a list of multimodal blocks and crashes
+    on `content_block["type"]`. List-of-blocks bypasses that path cleanly.
+    """
     system = SYSTEM_PROMPT.format(domain_knowledge=DOMAIN_KNOWLEDGE)
     human = HUMAN_PROMPT_TEMPLATE.format(
         latest_dd_change=json.dumps(pin.latest_dd_change.model_dump(mode="json"), indent=2),
         account_context=json.dumps(pin.account_context.model_dump(mode="json"), indent=2),
     )
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": human},
+        {"role": "system", "content": [{"type": "text", "text": system}]},
+        {"role": "user", "content": [{"type": "text", "text": human}]},
     ]
 
 

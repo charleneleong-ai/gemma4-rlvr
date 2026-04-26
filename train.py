@@ -401,6 +401,23 @@ def _load_dataset(data_dir: Path, heldout_n: int = 0, seed: int = 42):
         dataset = dataset.filter(lambda r: r.get("__meta__") is not True).remove_columns("__meta__")
     if "row_index" in dataset.column_names:
         dataset = dataset.remove_columns("row_index")
+
+    # Convert legacy string-content prompts to typed-block format. transformers
+    # >=5.5.0's apply_chat_template(tokenize=True) iterates string content as
+    # if it were a multimodal block list and crashes on `block["type"]`.
+    # build_chat_messages now produces the block form natively; this map fixes
+    # any pre-existing dataset on disk so we don't have to regenerate.
+    def _ensure_blocks(row):
+        new_prompt = []
+        for m in row["prompt"]:
+            c = m.get("content")
+            if isinstance(c, str):
+                new_prompt.append({"role": m["role"], "content": [{"type": "text", "text": c}]})
+            else:
+                new_prompt.append(m)
+        row["prompt"] = new_prompt
+        return row
+    dataset = dataset.map(_ensure_blocks)
     typer.echo(f"Loaded {len(dataset)} rows from {path.name}")
 
     if heldout_n <= 0:
@@ -560,6 +577,18 @@ def train(
     ),
     plateau_window: Optional[int] = typer.Option(None),
     plateau_delta: Optional[float] = typer.Option(None),
+    eval_heldout_n: Optional[int] = typer.Option(
+        None, help="Held-out eval rows. Set 0 to skip post-train heldout eval.",
+    ),
+    eval_regression_n: Optional[int] = typer.Option(
+        None, help="Regression eval rows from .error_analysis_cache. 0 to skip.",
+    ),
+    eval_batch_size: Optional[int] = typer.Option(None),
+    completion_preview_every: Optional[int] = typer.Option(
+        None, help="Log a completion preview Table to W&B every N steps. 0 to disable.",
+    ),
+    completion_preview_n_train: Optional[int] = typer.Option(None),
+    completion_preview_n_heldout: Optional[int] = typer.Option(None),
     wandb_run_name: Optional[str] = typer.Option(
         None, help="Weights & Biases run name. Auto-generated if omitted.",
     ),
@@ -580,6 +609,11 @@ def train(
         "max_steps": max_steps, "warmup_steps": warmup_steps, "save_steps": save_steps,
         "seed": seed, "patience": patience, "plateau_window": plateau_window,
         "plateau_delta": plateau_delta,
+        "eval_heldout_n": eval_heldout_n, "eval_regression_n": eval_regression_n,
+        "eval_batch_size": eval_batch_size,
+        "completion_preview_every": completion_preview_every,
+        "completion_preview_n_train": completion_preview_n_train,
+        "completion_preview_n_heldout": completion_preview_n_heldout,
     }
     for k, v in cli_overrides.items():
         if v is not None:
