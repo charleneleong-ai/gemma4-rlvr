@@ -45,23 +45,28 @@ If `step_time` per-iter logs jump above ~100s sustained on the new hardware, sus
 
 ## Pre-migration checklist
 
+- [x] **Commit + push the in-flight changes** on `feat/auto-research-loop` — done (4 commits pushed 2026-04-26)
+- [x] **PR #5** (`refactor/soften-well-formed-rubric`) merged to `main` — done; rubric softening is upstream
 - [ ] **Confirm in-flight work finished** on the current 40GB box:
   - `ps -ef | grep -E "rerun_top5_remaining|retro_eval_optA"` — both should be gone
-  - `experiments/dd_explainer/results.jsonl` should have rows `#22` and `#23` (in-flight #5/#13 reruns)
-  - Retro-eval should have populated heldout `metrics` for `#19`-`#23` with `rubric_version="2026-04-26-soften-well-formed"`
-- [ ] **Commit + push the in-flight changes** on `feat/auto-research-loop` (lots of uncommitted work — see `git status`)
-- [ ] **Verify PR #5** (`refactor/soften-well-formed-rubric`) merged to `main` — if so, the rubric change is upstream; if not, treat as outstanding
+  - `experiments/dd_explainer/results.jsonl` should have row `#23` (in-flight #13 retrain; #22 from #5 retrain already there)
+  - Retro-eval should have populated heldout `metrics` for `#20` only with `rubric_version="2026-04-26-soften-well-formed"` (surgical mode — see scoreboard note below)
 - [ ] **Push final progress.html screenshot** so the chart history is in git (`docs/autoresearch_progress.png`)
-- [ ] **Note the final 40GB metrics** in this doc (fill in below) so v1 vs v2 comparisons have an anchor
+- [ ] **Note the v1 anchor metric in the scoreboard below** so v2 has a comparison point
 
-### v1 final scoreboard (to fill in before migrating)
+### v1 final scoreboard
 
-| exp | config | train score | heldout mean_total | rubric_version |
+Surgical mode: only **#20** (the v1 best by train reward) gets re-evaluated under the new rubric, to anchor v1↔v2 comparison without burning ~3 hrs on snapshots whose individual numbers don't change the v2 plan. Other rows kept for context.
+
+| exp | config | train score | heldout mean_total (new rubric) | rubric_version |
 |---|---|---|---|---|
-| #20 | `num_generations=8` | 14.000 | 8.49 | (pre-soften — old AND) |
-| #21 | `lr=5e-6 + num_gen=8` | 13.875 | 8.39 | (pre-soften) |
-| #22 | `beta=0.02` | TBD | TBD | (post-retro-eval — soften) |
-| #23 | `lr=2e-6` | TBD | TBD | (post-retro-eval — soften) |
+| #19 | baseline (`train_fast`) | 11.500 | — (snapshot exists, not retro-eval'd) | — |
+| **#20** | **`num_generations=8`** | **14.000** | **TBD ← v1 ANCHOR** | `2026-04-26-soften-well-formed` |
+| #21 | `lr=5e-6 + num_gen=8` | 13.875 | — (snapshot exists, not retro-eval'd) | — |
+| #22 | `beta=0.02` | (filled by #5 retrain) | natural eval ran on OLD rubric | (pre-soften) |
+| #23 | `lr=2e-6` | (filled by #13 retrain) | natural eval on NEW rubric | `2026-04-26-soften-well-formed` |
+
+**To fill in the gaps later** (if v2 anchor surprises you and you want a finer v1 picture): edit `EXPS` in `/tmp/retro_eval_optA.py` to expand the list, snapshots are under `gemma_4_lora/exp_<N>/`. ~40 min per snapshot.
 
 ---
 
