@@ -20,6 +20,7 @@ dependencies = [
     "unsloth @ git+https://github.com/unslothai/unsloth",
     "unsloth-zoo[base] @ git+https://github.com/unslothai/unsloth-zoo",
     "plotly>=6.0.0",
+    "nvitop",
 ]
 
 [project.optional-dependencies]
