@@ -5,7 +5,7 @@
 #   - lora_rank: 128        (was 64 — minor capacity bump on a structured task)
 #   - max_seq_length: 8192  (was 4096 — full coverage of long regression traces)
 #   - num_generations: 16   (was 4-8 — tighter GRPO advantage estimates, the main quality lever)
-#   - eval_batch_size: 64   (was 32 — heldout halves to ~13min; if regression OOMs at 64, drop to 32)
+#   - eval_batch_size: 32   (regression at bs=64 confirmed-OOM with 8192 ctx — bumped down 2026-04-26)
 #
 # Step time: expect ~75-95s on PCIe 80GB (vs ~70-90s on SXM4 40GB). The PCIe form-factor
 # and 300W TDP cap mean training is ~5-10% slower per step than SXM4; the win is
@@ -37,8 +37,8 @@ train:
   beta: 0.04
   weight_decay: 0.001
 
-  # Eval: bigger batches now fit on 80GB
-  eval_batch_size: 64
+  # Eval: bs=32 (regression at 64 confirmed-OOMs with max_seq=8192)
+  eval_batch_size: 32
   eval_heldout_n: 1000
   eval_regression_n: 100
 
