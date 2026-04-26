@@ -425,7 +425,7 @@ class CompletionPreviewCallback(TrainerCallback):
         html = _PREVIEW_STYLE + html_header + "\n".join(self._html_blocks)
         wandb.log({
             "train/preview/completions_preview": table,
-            "train/images/completions_preview": wandb.Html(html),
+            "train/preview/completions_preview_image": wandb.Html(html),
         })
 
 
