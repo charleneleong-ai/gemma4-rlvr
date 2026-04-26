@@ -1,0 +1,40 @@
+# V2 baseline sweep — A100 PCIe 80GB, train_v2_80gb preset.
+#
+# Goal: validate the v2 stack (softened well_formed rubric, heldout promotion,
+# num_generations=16, max_seq_length=8192, no 4-bit) actually beats v1 best
+# (#20 heldout mean_total = 8.49) before committing budget to HP search.
+#
+# Iter 1 = pure v2 anchor — if heldout < 8.49, stop and debug rubric/promotion
+# regressions before continuing. Subsequent iters explore the most promising
+# v1 directions transferred to the v2 stack.
+
+common_overrides:
+  - "--max-steps"
+  - "80"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  - config: train_v2_80gb
+    overrides: []
+    description: "anchor (pure v2 defaults — promotion gate)"
+
+  - config: train_v2_80gb
+    overrides: ["--learning-rate", "5.0e-6"]
+    description: "lr=5e-6 (v1 best LR, transferred)"
+
+  - config: train_v2_80gb
+    overrides: ["--num-generations", "24"]
+    description: "num_generations=24 (push GRPO group size further)"
+
+  - config: train_v2_80gb
+    overrides: ["--beta", "0.02"]
+    description: "beta=0.02 (lower KL — more exploration, was v1 #5)"
+
+  - config: train_v2_80gb
+    overrides: ["--lora-rank", "64"]
+    description: "lora_rank=64 (sanity — does rank=128 buy anything?)"

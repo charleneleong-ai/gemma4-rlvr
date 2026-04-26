@@ -1,0 +1,39 @@
+# V1 exploration schedule — A100 SXM4 40GB, train_fast preset.
+#
+# This is the historical schedule used during v1 sweeps (#11–#18). Preserved
+# verbatim from the previous hardcoded `SCHEDULE` in autoresearch.py for
+# reproducibility — point `--schedule v1_explore` at it to re-run.
+#
+# All iters use train_fast.yaml (40GB-tuned) with lr=5e-6 anchor + variations
+# on num_generations / max_steps / warmup_steps.
+
+common_overrides:
+  - "--max-steps"
+  - "80"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  - config: train_fast
+    overrides: ["--learning-rate", "5.0e-6"]
+    description: "anchor (lr=5e-6 — eval-gate verification baseline)"
+
+  - config: train_fast
+    overrides: ["--learning-rate", "5.0e-6", "--num-generations", "8"]
+    description: "lr=5e-6 + num_generations=8 (tighter advantage estimate)"
+
+  - config: train_fast
+    overrides: ["--learning-rate", "5.0e-6", "--max-steps", "160"]
+    description: "lr=5e-6 + max_steps=160 (longer training budget)"
+
+  - config: train_fast
+    overrides: ["--learning-rate", "5.0e-6", "--warmup-steps", "60"]
+    description: "lr=5e-6 + warmup=60 (gentler initial ramp, default is 30)"
+
+  - config: train_fast
+    overrides: ["--learning-rate", "2.0e-6", "--max-steps", "160"]
+    description: "lr=2e-6 + max_steps=160 (small LR with longer training)"
