@@ -915,11 +915,12 @@ def train(
     _verify_adapter_nonzero(t.save_path)
     typer.echo(f"Saved LoRA adapter to {t.save_path}")
 
-    # Snapshot adapter weights to a per-experiment dir so retrospective eval
-    # is possible. Skip the tokenizer (~31MB, identical every run) — keep
-    # only the 533MB safetensors + tiny config.
+    # Snapshot adapter weights to a per-(config, experiment) dir so different
+    # configs don't overwrite each other's exp_<N> snapshots. Skip the
+    # tokenizer (~31MB, identical every run) — keep only the safetensors +
+    # tiny config.
     if entry is not None and entry.get("experiment") is not None:
-        snap = t.save_path / f"exp_{entry['experiment']}"
+        snap = t.save_path / config_name / f"exp_{entry['experiment']}"
         snap.mkdir(parents=True, exist_ok=True)
         for fname in ("adapter_model.safetensors", "adapter_config.json"):
             src = t.save_path / fname
@@ -974,7 +975,7 @@ def _autolog_experiment(settings, config_name: str, trainer, runtime_min: float,
         wandb_run_id=wandb.run.id,
         wandb_run_name=wandb.run.name or "",
     )
-    plot_progress()
+    plot_progress(config_name=config_name)
     return entry
 
 

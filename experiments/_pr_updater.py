@@ -1,27 +1,31 @@
 """Periodic PR refresher for the autoresearch sweep.
 
 Polls every N seconds and:
-1. Re-renders `docs/autoresearch_progress.png` from `results.jsonl`.
+1. Re-renders `docs/autoresearch_progress_<config>.png` from
+   `experiments/dd_explainer/<config>/results.jsonl`.
 2. If the PNG changed: git add + commit + push (so the embedded image
    in the PR body refreshes — GitHub serves it via `?raw=true`).
-3. Re-builds the sweep-narrative table from results.jsonl and PATCHes
-   PR #4's body between the markers
+3. Re-builds the sweep-narrative table and PATCHes PR #4's body between
    `<!-- SWEEP_NARRATIVE_START -->` … `<!-- SWEEP_NARRATIVE_END -->`.
 
-Detach with `setsid nohup .venv/bin/python -u experiments/_pr_updater.py …`
-so it survives Claude / SSH disconnect.
+Usage: `python experiments/_pr_updater.py <config_name>`
+Detach with setsid+nohup so it survives Claude / SSH disconnect.
 """
 from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RESULTS = ROOT / "experiments" / "dd_explainer" / "results.jsonl"
-PNG = ROOT / "docs" / "autoresearch_progress.png"
+if len(sys.argv) < 2:
+    raise SystemExit("usage: _pr_updater.py <config_name>")
+CONFIG_NAME = sys.argv[1]
+RESULTS = ROOT / "experiments" / "dd_explainer" / CONFIG_NAME / "results.jsonl"
+PNG = ROOT / "docs" / f"autoresearch_progress_{CONFIG_NAME}.png"
 RENDER = ROOT / "experiments" / "_render_screenshot.py"
 POLL_S = 300
 PR_NUMBER = 4
@@ -96,7 +100,7 @@ def _refresh_png() -> bool:
     before_mtime = PNG.stat().st_mtime if PNG.exists() else -1
     venv_py = ROOT / ".venv" / "bin" / "python"
     subprocess.run(
-        [str(venv_py), str(RENDER)],
+        [str(venv_py), str(RENDER), CONFIG_NAME],
         cwd=str(ROOT / "experiments"), check=False,
         capture_output=True,
     )

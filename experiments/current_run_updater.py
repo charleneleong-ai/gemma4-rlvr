@@ -16,15 +16,22 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
-SIDECAR = ROOT / "experiments" / "dd_explainer" / "current_run.json"
-RESULTS = ROOT / "experiments" / "dd_explainer" / "results.jsonl"
 POLL_S = 15
+
+# CLI: `python current_run_updater.py <config_name>` — paths are config-scoped.
+if len(sys.argv) < 2:
+    raise SystemExit("usage: current_run_updater.py <config_name>")
+CONFIG_NAME = sys.argv[1]
+SIDECAR = ROOT / "experiments" / "dd_explainer" / CONFIG_NAME / "current_run.json"
+RESULTS = ROOT / "experiments" / "dd_explainer" / CONFIG_NAME / "results.jsonl"
+SIDECAR.parent.mkdir(parents=True, exist_ok=True)
 
 ITER_START_RE = re.compile(r"\[(?P<ts>[\d\-T:Z]+)\] Iter (?P<n>\d+)/(?P<m>\d+): (?P<rest>.*)")
 ITER_END_RE = re.compile(r"\[[\d\-T:Z]+\] Iter (?P<n>\d+)/(?P<m>\d+) finished")

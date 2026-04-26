@@ -42,19 +42,32 @@ _STEP_RE = re.compile(r"'step_time': '([\-0-9.eE+]+)'")
 _WANDB_URL_RE = re.compile(r"https://wandb\.ai/[\w\-./]+/runs/[\w\-]+")
 
 
-def _task_dir(task: str) -> Path:
+def _task_dir(task: str, config_name: str | None = None) -> Path:
+    """Resolve the per-(task, config) artifact directory.
+
+    With `config_name`, returns `experiments/<task>/<config_name>/` so each
+    config's results.jsonl / progress.html / current_run.json are isolated.
+    Without it, falls back to the legacy flat `experiments/<task>/` for
+    callers (eg. archived snapshots) that predate the config split.
+    """
     d = EXPERIMENTS_DIR / task.lower().replace(" ", "_")
+    if config_name:
+        d = d / config_name.lower().replace(" ", "_")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def load_results(task: str = DEFAULT_TASK, include_superseded: bool = False) -> list[dict]:
-    """Load result rows for a task. By default, rows with `superseded_by` set
-    are filtered out so charts and aggregations show only canonical entries
-    (the rerun supersedes the original). Pass `include_superseded=True` for
-    bookkeeping that needs the full history (e.g. assigning the next exp #).
+def load_results(
+    task: str = DEFAULT_TASK,
+    config_name: str | None = None,
+    include_superseded: bool = False,
+) -> list[dict]:
+    """Load result rows for a task (and optional config). By default, rows
+    with `superseded_by` set are filtered out so charts and aggregations show
+    only canonical entries (the rerun supersedes the original). Pass
+    `include_superseded=True` for bookkeeping that needs the full history.
     """
-    f = _task_dir(task) / "results.jsonl"
+    f = _task_dir(task, config_name) / "results.jsonl"
     if not f.exists():
         return []
     rows = [json.loads(line) for line in f.read_text().strip().split("\n") if line]
@@ -63,19 +76,19 @@ def load_results(task: str = DEFAULT_TASK, include_superseded: bool = False) -> 
     return [r for r in rows if not r.get("superseded_by")]
 
 
-def _scrape_in_flight_run(task: str) -> dict | None:
-    """Read `<task>/current_run.json` (written by autoresearch at iter start)
-    and scrape the live training log for max-reward / step-count so far.
-    Returns a synthetic RUNNING row, or None if no iter is in flight.
+def _scrape_in_flight_run(task: str, config_name: str | None = None) -> dict | None:
+    """Read `<task>/<config>/current_run.json` (written by autoresearch at
+    iter start) and scrape the live training log for max-reward / step-count
+    so far. Returns a synthetic RUNNING row, or None if no iter is in flight.
     """
-    cur_f = _task_dir(task) / "current_run.json"
+    cur_f = _task_dir(task, config_name) / "current_run.json"
     if not cur_f.exists():
         return None
     try:
         cur = json.loads(cur_f.read_text())
     except json.JSONDecodeError:
         return None
-    finished = load_results(task)
+    finished = load_results(task, config_name=config_name)
     if finished and finished[-1]["experiment"] >= cur["experiment"]:
         return None
     log_path = Path(cur["log_path"])
@@ -177,8 +190,12 @@ def log_experiment(
     wandb_run_id: str = "",
     wandb_run_name: str = "",
 ) -> dict:
-    """Append a result row. If `status` is None, decide BASELINE/KEEP/DISCARD."""
-    prior = load_results(task, include_superseded=True)
+    """Append a result row. If `status` is None, decide BASELINE/KEEP/DISCARD.
+
+    Writes to `experiments/<task>/<config_name>/results.jsonl` so per-config
+    histories don't overwrite each other across sweeps with different presets.
+    """
+    prior = load_results(task, config_name=config_name, include_superseded=True)
     if status is None:
         status = _decide_status(prior, score, metrics=metrics)
 
@@ -198,7 +215,7 @@ def log_experiment(
         "wandb_run_name": wandb_run_name,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    f = _task_dir(task) / "results.jsonl"
+    f = _task_dir(task, config_name) / "results.jsonl"
     with f.open("a") as fh:
         fh.write(json.dumps(entry) + "\n")
     print(f"Logged to {f}: #{entry['experiment']} score={score} [{status}] {description}")
@@ -345,24 +362,26 @@ def _label(r: dict, is_best: bool = False) -> str:
     return "<br>".join(lines)
 
 
-def plot_progress(task: Optional[str] = None) -> Path:
+def plot_progress(task: Optional[str] = None, config_name: Optional[str] = None) -> Path:
     """Plot a per-task progress chart. With no `task`, plots every task with
-    a results.jsonl in `experiments/`. Returns the HTML output path.
+    a results.jsonl in `experiments/`. With `config_name`, scopes to one
+    config under that task. Returns the HTML output path.
     """
     tasks = [task] if task else sorted(
         d.name for d in EXPERIMENTS_DIR.iterdir() if d.is_dir() and (d / "results.jsonl").exists()
     )
-    tasks = [t for t in tasks if load_results(t)]
+    tasks = [t for t in tasks if load_results(t, config_name=config_name)]
     if not tasks:
         print("No results yet. Use `log` to add experiments.")
         return Path()
 
     subtitles = []
     for t in tasks:
-        rs = load_results(t)
+        rs = load_results(t, config_name=config_name)
         n_kept = sum(1 for r in rs if r["status"] in ("KEEP", "BASELINE"))
         rt = sum(r.get("runtime_min", 0) for r in rs)
-        subtitles.append(f"{t} — {len(rs)} experiments, {n_kept} kept{f', {rt:.0f}min total' if rt else ''}")
+        cfg_tag = f" [{config_name}]" if config_name else ""
+        subtitles.append(f"{t}{cfg_tag} — {len(rs)} experiments, {n_kept} kept{f', {rt:.0f}min total' if rt else ''}")
 
     fig = make_subplots(rows=len(tasks), cols=1, subplot_titles=subtitles, vertical_spacing=0.22)
     # Capture the count *before* we add per-row labels — these initial entries
@@ -380,8 +399,8 @@ def plot_progress(task: Optional[str] = None) -> Path:
     ]
 
     for i, t in enumerate(tasks, 1):
-        results = sorted(load_results(t), key=lambda r: r["experiment"])
-        in_flight = _scrape_in_flight_run(t)
+        results = sorted(load_results(t, config_name=config_name), key=lambda r: r["experiment"])
+        in_flight = _scrape_in_flight_run(t, config_name=config_name)
         if in_flight and not any(r["experiment"] == in_flight["experiment"] for r in results):
             results.append(in_flight)
         legend_seen: set[str] = set()
@@ -567,7 +586,7 @@ def plot_progress(task: Optional[str] = None) -> Path:
                         namelength=-1),
     )
 
-    out_dir = _task_dir(tasks[0]) if len(tasks) == 1 else EXPERIMENTS_DIR
+    out_dir = _task_dir(tasks[0], config_name) if len(tasks) == 1 else EXPERIMENTS_DIR
     html = out_dir / "progress.html"
     fig.write_html(
         str(html),
@@ -590,7 +609,7 @@ def plot_progress(task: Optional[str] = None) -> Path:
     # live in one page. plotly.js is already loaded by the main fig above, so
     # the second fig embeds with include_plotlyjs=False. A short description
     # block explains what mean_total is + cites the heldout technique.
-    eval_fig, _ = _build_eval_fig(tasks)
+    eval_fig, _ = _build_eval_fig(tasks, config_name=config_name)
     if eval_fig is not None:
         with open(html, "a") as fh:
             fh.write(eval_fig.to_html(include_plotlyjs=False, full_html=False))
@@ -702,7 +721,7 @@ def _eval_description_html() -> str:
 """
 
 
-def _build_eval_fig(tasks: list[str]):
+def _build_eval_fig(tasks: list[str], config_name: Optional[str] = None):
     """Build the held-out + regression pass-rate figure. Returns (fig, any_data).
 
     Returns (None, False) if no task has any eval data yet.
@@ -713,7 +732,7 @@ def _build_eval_fig(tasks: list[str]):
     )
     any_data = False
     for i, t in enumerate(tasks, 1):
-        rows = sorted(load_results(t), key=lambda r: r["experiment"])
+        rows = sorted(load_results(t, config_name=config_name), key=lambda r: r["experiment"])
         for series_key, label, color, axis in (
             ("heldout_mean", "held-out mean_total", "#27ae60", "y2"),
             ("heldout", "held-out pass_all (%)", "#3498db", "y"),
@@ -843,13 +862,16 @@ def log(
         metrics=metrics, notes=notes,
         wandb_url=wandb_url, wandb_run_id=wandb_run_id, wandb_run_name=wandb_run_name,
     )
-    plot_progress(task=task)
+    plot_progress(task=task, config_name=config_name)
 
 
 @app.command()
-def plot(task: Optional[str] = typer.Option(None, help="Plot just this task (default: all).")):
+def plot(
+    task: Optional[str] = typer.Option(None, help="Plot just this task (default: all)."),
+    config_name: Optional[str] = typer.Option(None, "--config-name", "-c", help="Scope to one config under the task."),
+):
     """Regenerate the progress chart from current results.jsonl."""
-    plot_progress(task=task)
+    plot_progress(task=task, config_name=config_name)
 
 
 if __name__ == "__main__":
