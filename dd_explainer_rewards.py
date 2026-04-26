@@ -20,6 +20,12 @@ from typing import Any, Dict, List, Optional
 from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 
 
+# Bumped whenever a reward function's scoring formula changes — written into
+# `_aggregate_scores` output so charts/results.jsonl don't silently mix
+# rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
+RUBRIC_VERSION = "2026-04-26-soften-well-formed"
+
+
 # =============================================================================
 # Shared helpers
 # =============================================================================
@@ -225,24 +231,39 @@ def reward_underpayment_language_constrained(completions, input_json, **kwargs) 
 _SENTENCE_SPLIT_RE = re.compile(r"[.!?]+")
 
 
+def _explanation_well_formed(e) -> bool:
+    """Per-explanation predicate: header ≤ 10 words AND 1-3 sentences."""
+    if len(e.header.split()) > 10:
+        return False
+    n_sentences = sum(
+        1 for s in _SENTENCE_SPLIT_RE.split(e.explanation) if s.strip()
+    )
+    return 1 <= n_sentences <= 3
+
+
 def reward_explanations_well_formed(completions, **kwargs) -> List[float]:
-    """+0.5 if every explanation is 1-3 sentences with a header ≤ 10 words, else -0.5."""
+    """Row score is proportional to the fraction of explanations that pass the
+    per-explanation shape check (header ≤ 10 words, 1-3 sentences).
+
+    Range stays [-0.5, +0.5]:
+    - all explanations pass → +0.5 (full credit, same as before)
+    - all explanations fail → -0.5 (worst case, same as before)
+    - partial pass: linear interpolation, e.g. 2/3 pass → +0.166
+
+    Replaces an all-or-nothing AND that scored ~40% pass on this dataset
+    purely because rows have 2-3 explanations and one bad one failed the
+    whole row. Fractional credit gives the model gradient signal for partial
+    wins instead of treating "2 good, 1 bad" identically to "all bad".
+    """
     scores: List[float] = []
     for c in completions:
         parsed = parse_response(c[0]["content"])
         if parsed is None or not parsed.explanations:
             scores.append(-0.5)
             continue
-        ok = True
-        for e in parsed.explanations:
-            if len(e.header.split()) > 10:
-                ok = False
-                break
-            n_sentences = sum(1 for s in _SENTENCE_SPLIT_RE.split(e.explanation) if s.strip())
-            if not (1 <= n_sentences <= 3):
-                ok = False
-                break
-        scores.append(0.5 if ok else -0.5)
+        n_ok = sum(1 for e in parsed.explanations if _explanation_well_formed(e))
+        n_total = len(parsed.explanations)
+        scores.append(-0.5 + 1.0 * (n_ok / n_total))
     return scores
 
 
