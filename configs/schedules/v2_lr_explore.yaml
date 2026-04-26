@@ -1,0 +1,123 @@
+# V2 lr-explore + ceiling-attack sweep — A100 PCIe 80GB, train_v2_80gb preset.
+#
+# Context: v2_baseline finished 4 iters with mean_total stuck at ~9.6 (E1 KEEP, lr=5e-6).
+# Per-rubric breakdown shows the ceiling is NOT the LR — it's:
+#   - f1_triggers stuck at ~7.5/10 (only 75% recall)
+#   - no_hallucinated_facts mean still NEGATIVE (~-0.27)
+#   - well_formed bouncing at ~0
+#   - prev_amount_correct stuck at 0 (model never attempts the calc)
+# E1 stopped at step 31/80 (EARLY_STOPPED) — likely hadn't converged.
+#
+# Goal: attack the ceiling structurally — longer training, tighter advantage,
+# length cap — then validate with seed-variance and a kitchen-sink combiner.
+#
+# Iter ordering: diagnostic first (run-longer), confidence check second
+# (seed=1337), structural levers third/fourth, then β sweet-spot, then the
+# kitchen-sink combo at the end. If iter 1 plateaus at 9.6 again, the ceiling
+# is rubric/data-side (next sweep would attack from there).
+#
+# GPU constraint: prior sweep saw 71-78GB peaks during regression eval at bs=64
+# (some batches OOM'd, regression numbers partial). common_overrides cap eval
+# at bs=32 for full regression coverage.
+#
+# Total runtime estimate: ~7.5h on A100 PCIe 80GB.
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  # 1. DIAGNOSTIC — KEEP winner stopped at step 31/80; let it run to 160 with
+  # looser plateau detection. If f1_triggers / no_halluc improve, the ceiling
+  # was just an early-stop artefact.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + max_steps=160 + patience=15 (let KEEP run past step 31)"
+
+  # 2. CONFIDENCE — seed-variance check. KEEP's 9.61 was a single seed=42 run;
+  # this confirms the ranking isn't seed-luck. Same long-run config as iter 1.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--seed"
+      - "1337"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + seed=1337 + max_steps=160 (variance check on KEEP)"
+
+  # 3. CAPACITY — tighter advantage estimates, uses idle GPU memory (step_time
+  # mean=63s leaves room). 8 * 3 = 24 satisfies (batch * grad_accum) % ng == 0.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--num-generations"
+      - "24"
+      - "--grad-accum"
+      - "3"
+      - "--max-steps"
+      - "120"
+    description: "lr=5e-6 + ng=24 (uses GPU headroom — tighter f1/halluc signal)"
+
+  # 4. HALLUCINATION CAP — shorter completions = less surface for fabrication.
+  # Cuts max_completion 1024 → 512.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--max-completion-length"
+      - "512"
+      - "--max-steps"
+      - "120"
+    description: "lr=5e-6 + max_completion=512 (length cap — attacks hallucination)"
+
+  # 5. BETA SWEET-SPOT — E2 (β=0.02) had highest pass_all (34.5%) but lower
+  # mean_total; E1 (β=0.04) had highest f1. 0.03 is the natural midpoint.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--beta"
+      - "0.03"
+    description: "lr=5e-6 + beta=0.03 (between E2's 0.02 high-pass_all and E1's 0.04 high-f1)"
+
+  # 6. KITCHEN-SINK — combine the 3 structural levers (long + ng=24 + length-cap).
+  # If individual gains stack, this is where the ceiling actually breaks.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--num-generations"
+      - "24"
+      - "--grad-accum"
+      - "3"
+      - "--max-completion-length"
+      - "512"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "kitchen-sink: lr=5e-6 + ng=24 + max_completion=512 + max_steps=160 (combined attack)"
