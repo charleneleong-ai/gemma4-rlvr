@@ -1,5 +1,11 @@
 # V2 cap-neg-tails RE-RUN — A100 PCIe 80GB, train_v2_80gb preset.
 #
+# STATUS: NOT RUNNING. E14's verdict gave us enough signal — the trade-off
+# pattern is established (see "REVISED FRAMING" below). This schedule is
+# preserved as documentation of the hypothesis we considered + chose not
+# to spend ~3h compute on. Resurrect later if the data-regen pivot
+# reopens questions about rubric balance.
+#
 # REVISED FRAMING (after E14 lands):
 #
 # The original v2_cap_neg_tails sweep was meant to test capping the
