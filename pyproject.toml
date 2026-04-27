@@ -33,8 +33,8 @@ dependencies = [
     "matplotlib",
     "pyyaml",
     # Reusable sweep-orchestration tooling extracted from this repo.
-    # Pinned to tag v0.0.2; once published to PyPI, drop the git+ssh prefix.
-    "autoresearch @ git+ssh://git@github.com/charleneleong-ai/autoresearch.git@v0.0.2",
+    # Pinned to tag v0.0.3; once published to PyPI, drop the git+ssh prefix.
+    "autoresearch @ git+ssh://git@github.com/charleneleong-ai/autoresearch.git@v0.0.3",
 ]
 
 [project.optional-dependencies]
