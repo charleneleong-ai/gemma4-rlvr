@@ -127,6 +127,53 @@ run = """
 ls -lht logs/ 2>/dev/null | head -10 || echo "(no logs/ directory)"
 """
 
+# ── autoresearch package wrappers (pkg-CLI replaces in-project scripts) ──
+# These call the `autoresearch-*` CLIs from the autoresearch package
+# (pyproject dep). Same behaviour as `experiments/_pr_updater.py` etc., but
+# project-agnostic. Once these are validated in production, the in-project
+# scripts can be deleted.
+
+[tasks."pkg-pr-updater"]
+description = "Launch the package-based PR refresher daemon. Pass --config (default train_v2_80gb)."
+run = """
+CFG="${1:-train_v2_80gb}"
+mkdir -p logs
+LOG=logs/pkg_pr_updater_${CFG}_$(date -u +%Y%m%dT%H%M%SZ).log
+echo "log: $LOG"
+setsid nohup .venv/bin/autoresearch-pr-updater \
+  --tag dd_explainer --config "$CFG" \
+  --pr 4 --repo charleneleong-ai/gemma4-rlvr \
+  --branch chore/import-autoresearch-pkg \
+  --cwd /workspace/gemma4_rl \
+  > "$LOG" 2>&1 < /dev/null & disown
+echo "PID: $!  (detached)"
+"""
+
+[tasks."pkg-current-run"]
+description = "Launch the package-based in-flight RUNNING-dot daemon. Pass --config."
+run = """
+CFG="${1:-train_v2_80gb}"
+mkdir -p logs
+LOG=logs/pkg_current_run_${CFG}_$(date -u +%Y%m%dT%H%M%SZ).log
+echo "log: $LOG"
+setsid nohup .venv/bin/autoresearch-current-run \
+  --tag dd_explainer --config "$CFG" \
+  --logs-dir /workspace/gemma4_rl/logs \
+  --experiments-dir /workspace/gemma4_rl/experiments \
+  > "$LOG" 2>&1 < /dev/null & disown
+echo "PID: $!  (detached)"
+"""
+
+[tasks."pkg-render"]
+description = "One-shot render of the progress PNG using the package renderer."
+run = """
+CFG="${1:-train_v2_80gb}"
+.venv/bin/autoresearch-render \
+  --experiments-dir /workspace/gemma4_rl/experiments \
+  --tag dd_explainer --config "$CFG" \
+  --out /workspace/gemma4_rl/experiments/progress/${CFG}/progress.png
+"""
+
 # ── Maintenance ──────────────────────────────────────────────────────
 
 [tasks."kill-train"]

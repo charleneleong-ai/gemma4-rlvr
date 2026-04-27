@@ -280,6 +280,18 @@ wheels = [
 ]
 
 [[package]]
+name = "autoresearch"
+version = "0.0.2"
+source = { git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=feat%2Fv0.1-port-daemons-from-gemma4-rl#949de6e77aba3335b5f92f007abc3817b1011ae2" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "plotly" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "typer" },
+]
+
+[[package]]
 name = "babel"
 version = "2.18.0"
 source = { registry = "https://pypi.org/simple" }
@@ -881,6 +893,7 @@ name = "gemma4-rl"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "autoresearch" },
     { name = "bitsandbytes" },
     { name = "datasets" },
     { name = "hydra-core" },
@@ -918,6 +931,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "autoresearch", git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=feat%2Fv0.1-port-daemons-from-gemma4-rl" },
     { name = "bitsandbytes" },
     { name = "datasets" },
     { name = "hydra-core" },

@@ -32,6 +32,9 @@ dependencies = [
     "safetensors",
     "matplotlib",
     "pyyaml",
+    # Reusable sweep-orchestration tooling extracted from this repo.
+    # Pinned to feat branch until autoresearch#1 lands on main + publishes.
+    "autoresearch @ git+ssh://git@github.com/charleneleong-ai/autoresearch.git@feat/v0.1-port-daemons-from-gemma4-rl",
 ]
 
 [project.optional-dependencies]
