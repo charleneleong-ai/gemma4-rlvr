@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-04-27-cap-neg-tails"
+RUBRIC_VERSION = "2026-04-27-cap-neg-tails-v2"
 
 # Negative-tail caps for the two penalty-heavy rewards. v2_step_time_relax
 # confirmed the v2 mean_total ceiling at ~9.6 is structural — the
@@ -207,7 +207,7 @@ def reward_no_hallucinated_facts(completions, input_json, **kwargs) -> List[floa
                 if abs(cited_pct) < 1.0:
                     continue
                 if not any(abs(cited_pct - rp) <= 0.5 for rp in real_pcts):
-                    score = -3.0
+                    score = NO_HALLUC_FAIL_SCORE
                     break
 
         scores.append(score)
