@@ -96,6 +96,9 @@ gemma_4_lora/
 # The Python tracker code (experiments/*.py) IS committed.
 experiments/**/results.jsonl
 experiments/**/progress.html
-experiments/**/progress.png.tmp
 experiments/**/eval_progress.html
 experiments/**/current_run.json
+# `experiments/dd_explainer/<config>/progress.png` is the package's default
+# render path when --png-path isn't passed. Always wrong for this repo —
+# the real committed PNG lives at experiments/progress/<config>/progress.png.
+experiments/dd_explainer/**/progress.png
