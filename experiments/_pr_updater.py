@@ -14,6 +14,7 @@ Detach with setsid+nohup so it survives Claude / SSH disconnect.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -22,15 +23,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 if len(sys.argv) < 2:
-    raise SystemExit("usage: _pr_updater.py <config_name>")
+    raise SystemExit(
+        "usage: _pr_updater.py <config_name>\n"
+        "  env: PR_UPDATER_POLL_S=<seconds> (default 600 = 10min)"
+    )
 CONFIG_NAME = sys.argv[1]
 RESULTS = ROOT / "experiments" / "dd_explainer" / CONFIG_NAME / "results.jsonl"
 PNG = ROOT / "experiments" / "progress" / CONFIG_NAME / "progress.png"
 RENDER = ROOT / "experiments" / "_render_screenshot.py"
-POLL_S = 600
-PR_NUMBER = 4
-REPO = "charleneleong-ai/gemma4-rlvr"
-BRANCH = "feat/auto-research-loop"
+POLL_S = int(os.environ.get("PR_UPDATER_POLL_S", "600"))
+PR_NUMBER = int(os.environ.get("PR_UPDATER_PR_NUMBER", "4"))
+REPO = os.environ.get("PR_UPDATER_REPO", "charleneleong-ai/gemma4-rlvr")
+BRANCH = os.environ.get("PR_UPDATER_BRANCH", "feat/auto-research-loop")
 MARKER_START = "<!-- SWEEP_NARRATIVE_START -->"
 MARKER_END = "<!-- SWEEP_NARRATIVE_END -->"
 
