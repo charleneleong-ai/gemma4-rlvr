@@ -89,7 +89,9 @@ def _load_schedule(name: str) -> tuple[list[tuple[str, list[str], str]], list[st
 
 # ── Triage thresholds ──────────────────────────────────────────────
 SLOW_WINDOW = 5            # rolling window for step_time check
-SLOW_MEAN_S = 90.0         # mean s/step above this = abandon
+SLOW_MEAN_S = 130.0        # mean s/step above this = abandon. Bumped 90→130
+                           # after v2_lr_explore: ng=24 naturally lands ~110-120s,
+                           # 90s killed legitimate higher-group configs at step 5.
 SLOW_SPIKE_S = 200.0       # any single step over this = abandon
 KL_DIVERGE = 1.0           # |kl| above this = policy collapse
 LOSS_DIVERGE = 10.0        # |loss| above this = numerical blow-up
@@ -101,8 +103,13 @@ GPU_UNDERUTIL_PCT = 35     # % below which GPU counts as wasted (not hung)
 GPU_UNDERUTIL_S   = 900    # 15 min consecutive low-util → wasted-compute kill.
                            # Longer than typical eval phase (~5-10min on 8192 ctx)
                            # so we don't kill mid-eval; assumes warmup grace covered.
-GPU_LOW_MEM_PCT   = 50     # peak memory % below which → undersized config
-GPU_LOW_MEM_S     = 1800   # 30 min without ever hitting 50% mem → kill.
+GPU_LOW_MEM_PCT   = 35     # peak memory % below which → undersized config.
+                           # Lowered 50→35 after v2_lr_explore: bs=8/ng=16 long-runs
+                           # sit at ~37% peak during 3+ hours of training before
+                           # eval spikes them to 90%+. 35% catches genuinely tiny
+                           # configs (≤30GB on 80GB) without false-killing the
+                           # default v2 stack mid-training.
+GPU_LOW_MEM_S     = 1800   # 30 min without ever hitting threshold → kill.
                            # Uses peak-so-far so eval spikes can save the run;
                            # only fires if training never approaches the budget.
 GPU_GRACE_S       = 180    # 3 min startup grace (model loading)
