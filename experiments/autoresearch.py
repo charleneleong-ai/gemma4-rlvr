@@ -1,7 +1,27 @@
 """Autonomous overnight research loop for gemma4 GRPO with active triage.
 
+This module is **the reusable orchestrator pattern** for this project. New
+ML projects on this branch should build on top of it rather than rolling
+their own sweep loop. The shape:
+
+    schedule.yaml (configs/schedules/<name>.yaml)
+        ├── common_overrides: shared CLI flags applied to every iter
+        └── iters: list of {config, overrides, description}
+              ↓
+    autoresearch.py (this module)
+        ├── runs each iter via subprocess to train.py
+        ├── tails child stdout in real time
+        ├── triage: SIGINT child if signals say "won't recover"
+        ├── GPU watcher: hang / wasted-compute / undersized kills
+        ├── per-iter status BASELINE/KEEP/DISCARD/EARLY_KILL/CRASH
+        └── per-config artefacts:
+              experiments/<task>/<config>/results.jsonl
+              experiments/<task>/<config>/progress.html
+              experiments/progress/<config>/progress.png
+              experiments/<task>/<config>/current_run.json   (sidecar)
+
 Sequentially launches a small sweep of `train.py` invocations. Each child
-auto-logs to `experiments/dd_explainer/results.jsonl` and refreshes the
+auto-logs to `experiments/<task>/<config>/results.jsonl` and refreshes the
 progress plot via train.py's try/finally hook (always — early-stop, SIGINT,
 or unexpected exception).
 
@@ -12,18 +32,25 @@ vanishing silently. Triage is conservative: act only on signals that mean
 the run cannot recover.
 
 Triage thresholds (per-step dict logs from TRL):
-  * mean step_time over last 5 steps > 90s   → too slow vs ~60s target
-  * single step_time > 200s                  → memory/runtime spike
-  * |kl| > 1.0                               → policy divergence
-  * |loss| > 10                              → numerical divergence
-  * no reward beat baseline-1 in last 25 steps → not learning
+  * mean step_time over last 5 steps > SLOW_MEAN_S → too slow vs target
+  * single step_time > 200s                        → memory/runtime spike
+  * |kl| > 1.0                                     → policy divergence
+  * |loss| > 10                                    → numerical divergence
+  * no reward beat baseline-1 in last 25 steps     → not learning
 
-Time bounding: every iteration also runs with --max-steps 80 + patience=8,
+GPU triage (calibrated to hardware envelope; see constants below):
+  * util <8% for 5min       → hang
+  * util <35% for 15min     → wasted compute
+  * peak_mem <35% for 30min → undersized config (use peak-so-far so eval
+                              spikes can save the run)
+
+Time bounding: every iter also runs with --max-steps 80 + patience=8,
 so even with no triage trigger a run caps at ~80 min.
 
 Usage:
-  python experiments/autoresearch.py                  # full schedule
-  python experiments/autoresearch.py --max-iters 3
+  python experiments/autoresearch.py --schedule <name>
+  python experiments/autoresearch.py --schedule <name> --max-iters 3
+  python experiments/autoresearch.py --schedule <name> --start-iter 2  # resume
 """
 from __future__ import annotations
 
