@@ -282,7 +282,7 @@ wheels = [
 [[package]]
 name = "autoresearch"
 version = "0.0.2"
-source = { git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=feat%2Fv0.1-port-daemons-from-gemma4-rl#949de6e77aba3335b5f92f007abc3817b1011ae2" }
+source = { git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=v0.0.2#9f1e530dce8df18af969546256fbba18bc00f578" }
 dependencies = [
     { name = "matplotlib" },
     { name = "plotly" },
@@ -931,7 +931,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "autoresearch", git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=feat%2Fv0.1-port-daemons-from-gemma4-rl" },
+    { name = "autoresearch", git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=v0.0.2" },
     { name = "bitsandbytes" },
     { name = "datasets" },
     { name = "hydra-core" },
