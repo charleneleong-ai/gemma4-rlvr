@@ -1,7 +1,7 @@
 """Periodic PR refresher for the autoresearch sweep.
 
 Polls every N seconds and:
-1. Re-renders `docs/autoresearch_progress_<config>.png` from
+1. Re-renders `experiments/progress/<config>/progress.png` from
    `experiments/dd_explainer/<config>/results.jsonl`.
 2. If the PNG changed: git add + commit + push (so the embedded image
    in the PR body refreshes — GitHub serves it via `?raw=true`).
@@ -25,7 +25,7 @@ if len(sys.argv) < 2:
     raise SystemExit("usage: _pr_updater.py <config_name>")
 CONFIG_NAME = sys.argv[1]
 RESULTS = ROOT / "experiments" / "dd_explainer" / CONFIG_NAME / "results.jsonl"
-PNG = ROOT / "docs" / f"autoresearch_progress_{CONFIG_NAME}.png"
+PNG = ROOT / "experiments" / "progress" / CONFIG_NAME / "progress.png"
 RENDER = ROOT / "experiments" / "_render_screenshot.py"
 POLL_S = 600
 PR_NUMBER = 4

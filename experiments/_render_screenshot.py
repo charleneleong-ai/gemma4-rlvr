@@ -3,7 +3,7 @@
 Reads the per-config `experiments/dd_explainer/<config_name>/results.jsonl`
 the Plotly chart uses and renders a static PNG that mirrors the visual
 encoding (status colour + best-run halo + kill_reason inline). Output
-filename is also config-scoped: `docs/autoresearch_progress_<config>.png`.
+is config-scoped: `experiments/progress/<config_name>/progress.png`.
 
 Usage:
   python experiments/_render_screenshot.py <config_name>
@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 
 from experiment_progress import _STATUS_STYLE, _kill_tag, load_results
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+PROGRESS_ROOT = Path(__file__).resolve().parent / "progress"
 
 
 def main() -> None:
@@ -29,7 +29,8 @@ def main() -> None:
                   key=lambda r: r["experiment"])
     if not rows:
         raise SystemExit(f"no results to plot for config {config_name!r}")
-    out = DOCS / f"autoresearch_progress_{config_name}.png"
+    out = PROGRESS_ROOT / config_name / "progress.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     best_exp = max(rows, key=lambda r: r["score"])["experiment"]
 
