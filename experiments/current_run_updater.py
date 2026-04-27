@@ -15,6 +15,7 @@ sidecar writes (Python doesn't hot-reload an edited module).
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -23,9 +24,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
-POLL_S = 15
+POLL_S = int(os.environ.get("CURRENT_RUN_POLL_S", "15"))
 
 # CLI: `python current_run_updater.py <config_name>` — paths are config-scoped.
+# Override poll cadence via `CURRENT_RUN_POLL_S=<seconds>` env var (default 15).
 if len(sys.argv) < 2:
     raise SystemExit("usage: current_run_updater.py <config_name>")
 CONFIG_NAME = sys.argv[1]
