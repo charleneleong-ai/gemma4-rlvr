@@ -111,3 +111,13 @@ If f1_triggers moves past 7.5 on the new distribution, the data-side ceiling is 
 | **E14 (long-run, ½-cap)** | 2026-04-27-cap-neg-tails | 8.961 | **6.473** | **-0.156** | **+0.144** | **29.9%** |
 
 W&B project: <https://wandb.ai/chaleong/gemma4-rlvr>
+
+## Deferred future approaches (for later)
+
+**Account-context outlier detection (instead of teaching the model to suppress hallucination).** Rather than continuing to push the LLM to "not hallucinate" via reward shaping, route account contexts through a separate encoder that detects out-of-distribution inputs — both from the synthetic generator AND from production traffic. When the encoder flags an outlier, return a structured "insufficient context / route for review" response instead of running the LLM at all.
+
+This moves the hallucination problem out of the model's reward landscape (where E14 showed it trades against f1) and into a pre-flight gate. Two upstream uses:
+- **Generator side**: filter synthetic rows where the encoder thinks the context is unrealistic — improves dataset quality without manual review
+- **Production side**: catch real-world inputs the model has never seen and short-circuit before hallucination becomes a risk
+
+Worth scoping after data regen confirms whether RL alone can clear the f1 ceiling.
