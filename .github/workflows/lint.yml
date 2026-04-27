@@ -1,0 +1,27 @@
+name: Lint
+
+# Runs the file-hygiene hooks defined in .pre-commit-config.yaml on every
+# PR + push to main. Same checks `mise run init` registers locally.
+#
+# Ruff is intentionally NOT run here — the existing source has ~400 ruff
+# issues from before the lint config existed. Cleanup is opt-in via
+# `mise run lint`. Once the maintained .py files have been ruff-cleaned,
+# add ruff hooks back to .pre-commit-config.yaml and they'll auto-land
+# in CI without touching this workflow.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pre-commit:
+    name: pre-commit (file hygiene)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: pre-commit/action@v3.0.1

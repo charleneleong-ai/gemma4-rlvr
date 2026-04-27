@@ -10,19 +10,29 @@ uv = "latest"
 # ── Environment setup ────────────────────────────────────────────────
 
 [tasks.init]
-description = "First-time bootstrap: create .venv via stdlib + install all deps from pyproject.toml/uv.lock"
+description = "First-time bootstrap: create .venv via stdlib + install all deps + register pre-commit hooks"
 run = """
 set -e
 [ -d .venv ] && rm -rf .venv
 python3.12 -m venv .venv
-uv sync
+uv sync --extra dev
+uv run pre-commit install --install-hooks
 echo ""
-.venv/bin/python -c "import torch, transformers, trl, unsloth; print('✓ deps OK'); print(f'transformers {transformers.__version__} | torch {torch.__version__} | cuda={torch.cuda.is_available()}')"
+uv run python -c "import torch, transformers, trl, unsloth; print('✓ deps OK'); print(f'transformers {transformers.__version__} | torch {torch.__version__} | cuda={torch.cuda.is_available()}')"
+echo "✓ pre-commit hooks registered (file hygiene only — `mise run lint` for ruff)"
 """
 
 [tasks.sync]
 description = "Refresh deps from pyproject.toml without recreating the venv"
-run = "uv sync"
+run = "uv sync --extra dev"
+
+[tasks.lint]
+description = "Run ruff with autofix on the maintained source files."
+run = "uv run ruff check --fix ."
+
+[tasks."pre-commit"]
+description = "Run all pre-commit hooks (file hygiene). Pass --all-files for full tree."
+run = "uv run pre-commit run"
 
 # ── Training ─────────────────────────────────────────────────────────
 
@@ -32,7 +42,7 @@ run = """
 mkdir -p logs
 LOG=logs/smoke_$(date -u +%Y%m%dT%H%M%SZ).log
 echo "log: $LOG"
-WANDB_MODE=disabled setsid nohup .venv/bin/python -u train.py train \
+WANDB_MODE=disabled setsid nohup uv run python -u train.py train \
   -c train_v2_80gb -d "[v2 smoke] env verification" \
   --max-steps 2 --eval-heldout-n 0 --eval-regression-n 0 \
   --completion-preview-every 0 \
@@ -57,7 +67,7 @@ mkdir -p logs
 LOG=logs/sweep_${SCHED}_$(date -u +%Y%m%dT%H%M%SZ).log
 echo "schedule: $SCHED"
 echo "log:      $LOG"
-setsid nohup .venv/bin/python -u experiments/autoresearch.py \
+setsid nohup uv run python -u experiments/autoresearch.py \
   --schedule "$SCHED" > "$LOG" 2>&1 < /dev/null &
 disown
 echo "PID:      $!  (detached — survives session death)"
@@ -67,13 +77,13 @@ echo "follow:   tail -F $LOG"
 
 [tasks.train]
 description = "Single train run with the default config. Pass overrides after --, e.g. mise run train -- --learning-rate 5e-6"
-run = ".venv/bin/python -u train.py train -c train_v2_80gb"
+run = "uv run python -u train.py train -c train_v2_80gb"
 
 # ── Data ─────────────────────────────────────────────────────────────
 
 [tasks.data]
 description = "Regenerate the 5500-row synthetic dataset (one-off, ~20s)."
-run = ".venv/bin/python dd_explainer_data_generator.py -n 5500"
+run = "uv run python dd_explainer_data_generator.py -n 5500"
 
 # ── Observability ────────────────────────────────────────────────────
 
@@ -89,7 +99,7 @@ run = "nvidia-smi --query-gpu=name,memory.used,memory.free,utilization.gpu --for
 description = "Regenerate progress.html for a config (default: train_v2_80gb). Pass config name as arg."
 run = """
 CFG="${1:-train_v2_80gb}"
-.venv/bin/python -c "from experiments.experiment_progress import plot_progress; plot_progress(\\"dd_explainer\\", config_name=\\"$CFG\\")"
+uv run python -c "from experiments.experiment_progress import plot_progress; plot_progress(\\"dd_explainer\\", config_name=\\"$CFG\\")"
 """
 
 [tasks.serve]
@@ -99,7 +109,7 @@ PORT="${1:-8080}"
 echo "→ http://localhost:$PORT/dd_explainer/<config_name>/progress.html"
 echo "→ e.g.   http://localhost:$PORT/dd_explainer/train_v2_80gb/progress.html"
 echo ""
-cd experiments && .venv/../.venv/bin/python -m http.server "$PORT" --bind 0.0.0.0
+cd experiments && .venv/../uv run python -m http.server "$PORT" --bind 0.0.0.0
 """
 
 [tasks.tail]
@@ -140,7 +150,7 @@ CFG="${1:-train_v2_80gb}"
 mkdir -p logs
 LOG=logs/pkg_pr_updater_${CFG}_$(date -u +%Y%m%dT%H%M%SZ).log
 echo "log: $LOG"
-setsid nohup .venv/bin/autoresearch-pr-updater \
+setsid nohup uv run autoresearch-pr-updater \
   --tag dd_explainer --config "$CFG" \
   --pr 4 --repo charleneleong-ai/gemma4-rlvr \
   --branch chore/import-autoresearch-pkg \
@@ -156,7 +166,7 @@ CFG="${1:-train_v2_80gb}"
 mkdir -p logs
 LOG=logs/pkg_current_run_${CFG}_$(date -u +%Y%m%dT%H%M%SZ).log
 echo "log: $LOG"
-setsid nohup .venv/bin/autoresearch-current-run \
+setsid nohup uv run autoresearch-current-run \
   --tag dd_explainer --config "$CFG" \
   --logs-dir /workspace/gemma4_rl/logs \
   --experiments-dir /workspace/gemma4_rl/experiments \
@@ -168,7 +178,7 @@ echo "PID: $!  (detached)"
 description = "One-shot render of the progress PNG using the package renderer."
 run = """
 CFG="${1:-train_v2_80gb}"
-.venv/bin/autoresearch-render \
+uv run autoresearch-render \
   --experiments-dir /workspace/gemma4_rl/experiments \
   --tag dd_explainer --config "$CFG" \
   --out /workspace/gemma4_rl/experiments/progress/${CFG}/progress.png

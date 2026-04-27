@@ -43,6 +43,8 @@ dev = [
     "jupyterlab",
     "ipywidgets",
     "tensorboard",
+    "pre-commit>=4.0",
+    "ruff>=0.6",
 ]
 
 [tool.uv]
@@ -69,3 +71,26 @@ build-backend = "hatchling.build"
 # Hatchling refuses direct references by default — flip this on so `uv sync`
 # / `pip install -e .` can resolve them.
 allow-direct-references = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Don't lint generated / vendored / experiment-output paths.
+exclude = [
+    ".venv",
+    "wandb",
+    "outputs",
+    "gemma_4_lora",
+    "torch_cache",
+    "hf_cache",
+    "unsloth_compiled_cache",
+    "experiments/dd_explainer",
+    "experiments/progress",
+    ".error_analysis_cache",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+# typer requires `typer.Option(...)` calls in argument defaults — disable
+# B008 globally (same workaround as the autoresearch package).
+ignore = ["B008"]
