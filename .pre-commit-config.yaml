@@ -1,0 +1,26 @@
+# pre-commit hooks for gemma4-rl.
+#
+# Install:
+#   mise run init             # gets dev deps + registers hooks
+#
+# Run manually on all files:
+#   mise run pre-commit -- --all-files
+#
+# Scope is intentionally minimal — file hygiene only. Ruff is NOT in
+# pre-commit (the existing codebase has ~400 issues; cleanup is
+# opt-in via `mise run lint` rather than a pre-commit blocker).
+# Once the source files have been ruff-cleaned, add ruff-check + ruff-format
+# back in to enforce going forward.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+        exclude: ^(experiments/progress/.*\.png|data/dd_dataset_.*\.meta\.json)$
