@@ -282,4 +282,4 @@ Estimated work: 60-80 min on the new box. Skip entirely if v2 sweeps work fine w
 
 ---
 
-*Drafted by Claude session on `feat/auto-research-loop`. Paths assume `/workspace/gemma4_rl/`. Adjust if cloned elsewhere on the new box.*
+*Drafted on `feat/auto-research-loop`. Paths assume `/workspace/gemma4_rl/`. Adjust if cloned elsewhere on the new box.*

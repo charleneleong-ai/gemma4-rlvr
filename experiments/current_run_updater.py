@@ -1,8 +1,8 @@
 """Keep `experiments/dd_explainer/current_run.json` in sync with whatever
 iter the autoresearch loop is on.
 
-Runs as a detached daemon (setsid + nohup) so it survives Claude / SSH
-disconnects. Polls the latest `logs/autoresearch_*.log` every N seconds:
+Runs as a detached daemon (setsid + nohup) so it survives SSH / coding-agent
+session disconnects. Polls the latest `logs/autoresearch_*.log` every N seconds:
 
   * On the most recent `Iter N/M: ...` line with no matching
     `Iter N/M finished ...` below it → write current_run.json.

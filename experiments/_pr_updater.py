@@ -9,7 +9,7 @@ Polls every N seconds and:
    `<!-- SWEEP_NARRATIVE_START -->` … `<!-- SWEEP_NARRATIVE_END -->`.
 
 Usage: `python experiments/_pr_updater.py <config_name>`
-Detach with setsid+nohup so it survives Claude / SSH disconnect.
+Detach with setsid+nohup so it survives SSH / coding-agent session disconnect.
 """
 from __future__ import annotations
 
