@@ -1,0 +1,94 @@
+# V2 weighted no_halluc — A100 PCIe 80GB, train_v2_80gb preset, NEW dataset.
+#
+# E16 confirmed the data-side ceiling cause: f1 lifted to 7.523 on the new
+# multi-trigger dataset. But mean_total stayed under E1's 9.611 because
+# no_halluc collapsed to -0.92 (model fabricates more on multi-fact contexts).
+#
+# This sweep tests reward weighting as the cheapest mitigation: same data,
+# same lr, same long-run config — only the reward weight on
+# `reward_no_hallucinated_facts` changes (×2 in iters 1+2, ×3 in iters 3+4).
+#
+# Brackets the f1 ↔ no_halluc trade ridge at 4 points:
+#   {weight=2, weight=3} × {anchor (max_steps=80), long-run (max_steps=160)}
+#
+# Runs ~5h overnight on 80GB. Designed to provide a curve, so even if
+# weight=2 is the right answer, weight=3 confirms it didn't help further
+# (or, less likely, would have).
+#
+# Comparison anchors:
+#   E15  (anchor, weight=1, new data):  mean_total=8.78, f1=7.34, no_hal=-0.90
+#   E16  (long,   weight=1, new data):  mean_total=9.08, f1=7.52, no_hal=-0.92
+#
+# Predicted outcomes:
+#   weight=2: no_hal probably -0.5 to -0.3 (lifted by stronger penalty
+#     gradient), f1 maybe drops to ~7.2 (model retreats slightly), mean_total
+#     comparable to E16 or higher.
+#   weight=3: trade-off ridge pushed further — no_hal closer to 0, f1
+#     drops to ~6.8 maybe. mean_total may go DOWN even though no_hal lifted.
+#
+# Verdict matrix:
+#   weight=2 mean_total > E16 → reward weighting is the right lever
+#   weight=2 mean_total ≈ E16 BUT no_hal much better → useful per-rubric quality
+#   weight=2 mean_total < E16 → reward weighting trades f1 for no_hal at a loss
+#   weight=3 always-worse → confirms ×2 is the sweet spot
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  # 1. ANCHOR weight=2 — direct comparison vs E15.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--no-halluc-weight"
+      - "2.0"
+    description: "lr=5e-6 + new data + no_halluc×2 (anchor — vs E15's 8.78/7.34/-0.90)"
+
+  # 2. LONG-RUN weight=2 — direct comparison vs E16, the f1 winner.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--no-halluc-weight"
+      - "2.0"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + new data + no_halluc×2 + max_steps=160 (vs E16's 9.08/7.52/-0.92)"
+
+  # 3. ANCHOR weight=3 — bracket the curve.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--no-halluc-weight"
+      - "3.0"
+    description: "lr=5e-6 + new data + no_halluc×3 (anchor — bracket vs ×2)"
+
+  # 4. LONG-RUN weight=3 — bracket long-run.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--no-halluc-weight"
+      - "3.0"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + new data + no_halluc×3 + max_steps=160 (bracket long-run)"

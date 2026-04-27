@@ -78,7 +78,9 @@ from dd_explainer_data_generator import (  # noqa: E402
 from dd_explainer_rewards import (  # noqa: E402
     REWARD_FUNCS,
     RUBRIC_VERSION,
+    make_weighted_no_halluc,
     parse_response,
+    reward_no_hallucinated_facts,
     score_completion,
 )
 import time  # noqa: E402
@@ -732,6 +734,11 @@ def train(
     wandb_run_name: Optional[str] = typer.Option(
         None, help="Weights & Biases run name. Auto-generated if omitted.",
     ),
+    no_halluc_weight: float = typer.Option(
+        1.0,
+        help="Multiplier on reward_no_hallucinated_facts in GRPO sum (default 1.0). "
+             "Set >1 to put more gradient pressure on hallucination dimension.",
+    ),
 ) -> None:
     """Run GRPO training with the 7 verifiable rewards from dd_explainer_rewards."""
     # 1. Load Hydra YAML → typed Settings.
@@ -864,10 +871,19 @@ def train(
         run_name=settings.wandb.run_name,
     )
 
+    # Apply --no-halluc-weight if != 1.0 by swapping the no_halluc reward
+    # function in REWARD_FUNCS with a weighted variant. Keeps everything else
+    # identical so cross-weight comparisons stay clean.
+    reward_funcs = list(REWARD_FUNCS)
+    if no_halluc_weight != 1.0:
+        idx = reward_funcs.index(reward_no_hallucinated_facts)
+        reward_funcs[idx] = make_weighted_no_halluc(no_halluc_weight)
+        typer.echo(f"[train] no_halluc reward weighted ×{no_halluc_weight}")
+
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
-        reward_funcs=REWARD_FUNCS,
+        reward_funcs=reward_funcs,
         args=training_args,
         train_dataset=dataset,
         callbacks=callbacks,

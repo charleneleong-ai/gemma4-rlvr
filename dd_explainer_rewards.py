@@ -281,6 +281,21 @@ def reward_explanations_well_formed(completions, **kwargs) -> List[float]:
 # =============================================================================
 
 
+def make_weighted_no_halluc(weight: float):
+    """Factory for a weighted `reward_no_hallucinated_facts`. weight=1.0 returns
+    the original; weight=2.0 doubles every score (lift + penalty proportionally).
+    Used by train.py when `--no-halluc-weight != 1.0`.
+    """
+    if weight == 1.0:
+        return reward_no_hallucinated_facts
+
+    def weighted(*args, **kwargs) -> List[float]:
+        return [weight * s for s in reward_no_hallucinated_facts(*args, **kwargs)]
+
+    weighted.__name__ = "reward_no_hallucinated_facts"  # GRPOTrainer logs by name
+    return weighted
+
+
 REWARD_FUNCS = [
     reward_schema_valid,
     reward_triggers_in_enum,
