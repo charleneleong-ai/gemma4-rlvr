@@ -1,0 +1,74 @@
+# V2 step-time-relax retry sweep — A100 PCIe 80GB, train_v2_80gb preset.
+#
+# v2_lr_explore left 3 high-value diagnostics with no data:
+#   E4 lr=5e-6 + max_steps=160        — manual SIGINT during code-update pivot
+#   E5 lr=5e-6 + seed=1337 + 160      — manual SIGINT during code-update pivot
+#   E6 lr=5e-6 + ng=24                 — killed by SLOW_MEAN_S=90 (step_time 114s/step)
+#
+# Triage thresholds calibrated to v2_80gb's actual envelope (committed alongside
+# this schedule):
+#   SLOW_MEAN_S      90 → 130   (allows ng=24's natural 110-120s/step)
+#   GPU_LOW_MEM_PCT  50 → 35    (long-run training-phase peak ~37% before eval)
+#
+# Total runtime estimate: ~5h. Iters ordered so the diagnostic with the highest
+# information value (long-run lr=5e-6) runs first.
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  # 1. THE MISSING DIAGNOSTIC — KEEP champion (E1 mean_total=9.611) early-stopped
+  # at step 31/80. Letting it run to 160 with looser plateau detection answers
+  # whether the 9.6 ceiling was just an early-stop artefact.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + max_steps=160 + patience=15 (the missed long-run diagnostic)"
+
+  # 2. SEED VARIANCE — KEEP's 9.611 came from one seed=42 run. ±0.5 mean_total
+  # between siblings is within seed noise. Re-run the long config with a new
+  # seed to confirm the ranking is real.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--seed"
+      - "1337"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + seed=1337 + max_steps=160 (variance check on KEEP)"
+
+  # 3. CAPACITY — was triage-killed twice in v2_lr_explore. With SLOW_MEAN_S=130
+  # this should now survive its natural 110-120s/step pace. ng=24 = tighter
+  # advantage estimates on the noisy f1/no-halluc rewards.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--num-generations"
+      - "24"
+      - "--grad-accum"
+      - "3"
+      - "--max-steps"
+      - "120"
+    description: "lr=5e-6 + ng=24 (retry — last 2 attempts triage-killed by old SLOW_MEAN_S=90)"
