@@ -1,0 +1,61 @@
+# V2 cap-neg-tails RE-RUN — A100 PCIe 80GB, train_v2_80gb preset.
+#
+# Why this exists: the original v2_cap_neg_tails sweep (E13, E14) was meant
+# to test capping BOTH no_halluc fail paths (tariff + percentage) at -1
+# instead of -3. But the 2026-04-27 rubric edit only patched the tariff
+# path — line 210 in reward_no_hallucinated_facts kept the percentage
+# fail at -3.0 (caught later, fixed in 59d9ad3, RUBRIC_VERSION bumped to
+# `2026-04-27-cap-neg-tails-v2`).
+#
+# So E13/E14 trained on a HALF-capped rubric, not the full softening we
+# claimed in docs/ceiling-diagnosis-2026-04-27.md. Before we abandon the
+# reward-shaping hypothesis and pivot to data regen, fairness demands a
+# proper re-test.
+#
+# This schedule re-runs the same two iters as v2_cap_neg_tails, now on
+# the fully-capped rubric. Compare:
+#   E1  (champion, OLD rubric)        mean_total=9.611, no_halluc=-0.328
+#   E13 (anchor, half-capped)         mean_total=9.463, no_halluc=-0.424
+#   E14 (long-run, half-capped)       (in-flight at schedule write time)
+#   ---
+#   New iters under the FULLY-capped rubric:
+#   anchor    : projects to no_halluc ≈ +0.29 if pass rate stays ~64%
+#   long-run  : answers whether longer training can raise pass rate too
+#
+# Total runtime: ~3h.
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  # 1. Anchor on FULLY-capped rubric — direct comparison vs E13.
+  # If mean_total > E13's 9.463 AND f1 stays ≥ 7.4, the cap is helping.
+  # If mean_total < E13's 9.463, softer gradient pressure is actively
+  # hurting — confirms reward shaping is the wrong lever for this ceiling.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+    description: "lr=5e-6 + FULLY capped neg tails (re-anchor on rubric_v2)"
+
+  # 2. Long-run on FULLY-capped rubric — compare vs E14.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + max_steps=160 + FULLY capped neg tails (long-run on rubric_v2)"
