@@ -137,11 +137,9 @@ run = """
 ls -lht logs/ 2>/dev/null | head -10 || echo "(no logs/ directory)"
 """
 
-# ── autoresearch package wrappers (pkg-CLI replaces in-project scripts) ──
-# These call the `autoresearch-*` CLIs from the autoresearch package
-# (pyproject dep). Same behaviour as `experiments/_pr_updater.py` etc., but
-# project-agnostic. Once these are validated in production, the in-project
-# scripts can be deleted.
+# ── autoresearch package wrappers ────────────────────────────────────
+# Wrap the `autoresearch-*` CLIs (from the package) with this project's paths.
+# In-project `experiments/_pr_updater.py` etc. stay until these are battle-tested.
 
 [tasks."pkg-pr-updater"]
 description = "Launch the package-based PR refresher daemon. Pass --config (default train_v2_80gb)."
@@ -150,10 +148,8 @@ CFG="${1:-train_v2_80gb}"
 mkdir -p logs
 LOG=logs/pkg_pr_updater_${CFG}_$(date -u +%Y%m%dT%H%M%SZ).log
 echo "log: $LOG"
-# --png-path overrides the package's default (which would land in the
-# gitignored experiments/dd_explainer/<config>/progress.png) to land at
-# the committable experiments/progress/<config>/progress.png — this
-# project's convention.
+# --png-path overrides the package default — sends the PNG to the
+# committable experiments/progress/<config>/ path (gitignored otherwise).
 PR="${PR_NUMBER:-6}"
 setsid nohup uv run autoresearch-pr-updater \
   --tag dd_explainer --config "$CFG" \
