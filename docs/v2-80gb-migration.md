@@ -52,7 +52,7 @@ If `step_time` per-iter logs jump above ~100s sustained on the new hardware, sus
   - `experiments/dd_explainer/results.jsonl` populated through row `#23`
   - Surgical retro-eval patched `#20` with `rubric_version="2026-04-26-soften-well-formed"`
   - GPU idle (4 MiB / 0% util) — ready for migration
-- [ ] **Push final progress.html screenshot** so the chart history is in git (`docs/autoresearch_progress.png`)
+- [ ] **Push final progress.html screenshot** so the chart history is in git (`experiments/progress/<config>/progress.png`)
 
 ### v1 final scoreboard
 
