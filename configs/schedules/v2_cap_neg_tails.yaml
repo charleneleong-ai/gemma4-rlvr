@@ -1,0 +1,57 @@
+# V2 cap-neg-tails sweep — A100 PCIe 80GB, train_v2_80gb preset.
+#
+# 13 experiments confirmed the v2 ceiling at mean_total~9.6 is structural:
+# CLI levers (lr, beta, ng, max_steps, max_completion, lora_rank, seed) all
+# explored. None move the rubric ceiling. f1_triggers stuck at ~7.5/10
+# (75% recall), no_hallucinated_facts always negative, well_formed flat,
+# prev_amount_correct never moves from 0.
+#
+# Hypothesis: the -3 failure penalties on `no_hallucinated_facts` and
+# `prev_amount_correct` are dragging the negative tail enough to mask
+# structural learning gains. Capping both to -1 (rubric 2026-04-27-cap-neg-tails)
+# preserves gradient direction but lifts the floor.
+#
+# Note: rubric_version stamped per-row. Old runs (2026-04-26-soften-well-formed)
+# and new runs (2026-04-27-cap-neg-tails) are NOT directly mean_total-comparable;
+# compare per-rubric scores instead (f1, well_formed unchanged across rubrics;
+# prev_amount and no_halluc only differ on FAIL pass-through value).
+#
+# Total runtime: ~3.5h (2 iters).
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  # 1. ANCHOR — pure default config under the new rubric. Direct comparison
+  # to E1 (lr=5e-6, mean_total=9.611 on old rubric). If structural learning
+  # is real, mean_total here should be > 10 (lifted by capped tails);
+  # f1_triggers should also move past 7.5 if RL signal sharpening helps.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+    description: "lr=5e-6 + capped neg tails (anchor — vs E1 9.611 on old rubric)"
+
+  # 2. LONG-RUN — let the model train past plateau under the new rubric.
+  # E10 (long-run on old rubric) plateaued at 9.41; with cleaner gradient
+  # signal, longer training may now actually improve.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + capped neg tails + max_steps=160 (long-run under new rubric)"

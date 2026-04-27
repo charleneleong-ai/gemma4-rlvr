@@ -23,7 +23,17 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-04-26-soften-well-formed"
+RUBRIC_VERSION = "2026-04-27-cap-neg-tails"
+
+# Negative-tail caps for the two penalty-heavy rewards. v2_step_time_relax
+# confirmed the v2 mean_total ceiling at ~9.6 is structural — the
+# `no_hallucinated_facts` and `prev_amount_correct` rewards were dragging
+# the mean by ~1 point each via their -3 failure mode. Capping the failure
+# at -1 preserves the gradient signal (model still penalised for hallucination)
+# but stops the negative tail from masking actual learning gains. f1_triggers
+# (max 10) remains the dominant lever.
+NO_HALLUC_FAIL_SCORE = -1.0     # was -3.0 in 2026-04-26 rubric
+PREV_AMOUNT_FAIL_SCORE = -1.0   # was -3.0 in 2026-04-26 rubric
 
 
 # =============================================================================
@@ -157,7 +167,7 @@ def reward_previous_dd_amount_correct(completions, input_json, **kwargs) -> List
         if not cited:
             scores.append(0.0)
             continue
-        scores.append(2.0 if all(abs(v - expected) <= 0.01 for v in cited) else -3.0)
+        scores.append(2.0 if all(abs(v - expected) <= 0.01 for v in cited) else PREV_AMOUNT_FAIL_SCORE)
     return scores
 
 
@@ -188,7 +198,7 @@ def reward_no_hallucinated_facts(completions, input_json, **kwargs) -> List[floa
         for m in _TARIFF_RE.finditer(text):
             cited = m.group(1).strip().lower()
             if not any(cited in t or t in cited for t in tariffs if t):
-                score = -3.0
+                score = NO_HALLUC_FAIL_SCORE
                 break
 
         if score > 0:
