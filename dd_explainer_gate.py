@@ -123,8 +123,13 @@ class GateModel:
 
     @torch.no_grad()
     def predict_outlier_score(self, input_json: dict[str, Any]) -> float:
-        """Returns P(OOD) in [0, 1] — sigmoid of the head logit."""
-        text = json.dumps(input_json.get("account_context", {}), sort_keys=True)
+        """Returns P(OOD) in [0, 1] — sigmoid of the head logit.
+
+        `default=str` handles datetime objects that arrive from HuggingFace
+        Datasets (the heldout rows can carry parsed datetimes rather than the
+        ISO strings the synthetic generator wrote out).
+        """
+        text = json.dumps(input_json.get("account_context", {}), sort_keys=True, default=str)
         emb = _embed([text], self.tokenizer, self.encoder, self.device)
         if self.features == "text+numeric":
             assert self.numeric_mean is not None and self.numeric_std is not None

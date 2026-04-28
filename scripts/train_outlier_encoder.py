@@ -73,8 +73,9 @@ def _stratified_split(
 
 def _serialize(row: dict[str, Any]) -> str:
     """Compact JSON of account_context — what the encoder sees. Keep it
-    deterministic (sort_keys) so re-runs hash to the same input."""
-    return json.dumps(row["input_json"]["account_context"], sort_keys=True)
+    deterministic (sort_keys) so re-runs hash to the same input. `default=str`
+    handles datetime objects that may arrive from HF Datasets after parsing."""
+    return json.dumps(row["input_json"]["account_context"], sort_keys=True, default=str)
 
 
 # Domain features that bypass the encoder's blind spot for sign / magnitude /
