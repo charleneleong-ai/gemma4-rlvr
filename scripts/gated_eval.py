@@ -74,7 +74,10 @@ def main(
     model_name: str = typer.Option("unsloth/gemma-4-E4B-it"),
     data_dir: Path = typer.Option(Path("data"), help="Where the dd_dataset_*.jsonl lives"),
     eval_heldout_n: int = typer.Option(1000, help="Number of heldout rows to score."),
-    threshold: float = typer.Option(0.5, help="Gate threshold P(OOD) — rows above are flagged."),
+    thresholds: str = typer.Option(
+        "0.5,0.7,0.85,0.95",
+        help="Comma-separated gate thresholds to sweep — generates once, scores at each.",
+    ),
     seed: int = typer.Option(42, help="Heldout-sampling seed (must match training)."),
     max_seq_length: int = typer.Option(8192),
     max_completion_length: int = typer.Option(1024),
@@ -99,14 +102,14 @@ def main(
     n = len(heldout_ds)
     typer.echo(f"heldout ready: {n} rows")
 
+    threshold_list = [float(t) for t in thresholds.split(",")]
     typer.echo("scoring gate on every heldout row…")
     t0 = time.monotonic()
     gate_scores = [gate.predict_outlier_score(heldout_ds[i]["input_json"]) for i in range(n)]
-    n_flagged = sum(1 for s in gate_scores if s >= threshold)
-    typer.echo(
-        f"  gate done in {time.monotonic() - t0:.1f}s  "
-        f"flagged {n_flagged}/{n} ({n_flagged / n:.1%}) at threshold={threshold}"
-    )
+    typer.echo(f"  gate done in {time.monotonic() - t0:.1f}s")
+    for t in threshold_list:
+        flagged = sum(1 for s in gate_scores if s >= t)
+        typer.echo(f"  threshold={t:>4}: {flagged}/{n} flagged ({flagged / n:.1%})")
 
     typer.echo("running Gemma on the full heldout (temp=0, batched)…")
     t0 = time.monotonic()
@@ -121,24 +124,43 @@ def main(
 
     fallback_text = json.dumps(fallback_response())
 
+    # Score the ungated pass once — same data used by every threshold below.
     ungated_rows: list[dict[str, float]] = []
-    gated_rows: list[dict[str, float]] = []
     for i in range(n):
         gt = sorted(heldout_ds[i]["ground_truth_triggers"])
         inp = heldout_ds[i]["input_json"]
-        ungated_score = score_completion(completions[i], gt, inp)
-        ungated_rows.append(ungated_score)
-        if gate_scores[i] >= threshold:
-            gated_rows.append(score_completion(fallback_text, gt, inp))
-        else:
-            gated_rows.append(ungated_score)
-
+        ungated_rows.append(score_completion(completions[i], gt, inp))
     agg_ungated = _aggregate_scores(ungated_rows)
-    agg_gated = _aggregate_scores(gated_rows)
 
-    typer.echo("\n=== heldout (n={n}) — E18 adapter ===".format(n=n))
-    typer.echo(f"  ungated:  {_format_agg(agg_ungated)}")
-    typer.echo(f"  gated:    {_format_agg(agg_gated)}")
+    # Pre-score the fallback row-wise — picking which gate flags it costs
+    # us the same regardless of threshold, so we do it once here.
+    fallback_rows: list[dict[str, float]] = []
+    for i in range(n):
+        gt = sorted(heldout_ds[i]["ground_truth_triggers"])
+        inp = heldout_ds[i]["input_json"]
+        fallback_rows.append(score_completion(fallback_text, gt, inp))
+
+    # Sweep thresholds — ungated stays put; only the gate-vs-fallback substitution changes.
+    typer.echo(f"\n=== heldout (n={n}) — E18 adapter ===")
+    typer.echo(f"  ungated:                  {_format_agg(agg_ungated)}")
+
+    per_threshold: dict[str, dict[str, Any]] = {}
+    for t in threshold_list:
+        gated_rows = [
+            fallback_rows[i] if gate_scores[i] >= t else ungated_rows[i]
+            for i in range(n)
+        ]
+        agg_gated = _aggregate_scores(gated_rows)
+        n_flagged = sum(1 for s in gate_scores if s >= t)
+        typer.echo(
+            f"  gated@{t:<4} ({n_flagged:>3}/{n} flagged):  {_format_agg(agg_gated)}"
+        )
+        per_threshold[str(t)] = {
+            "threshold": t,
+            "n_flagged": n_flagged,
+            "flag_rate": n_flagged / n if n else 0.0,
+            "agg": agg_gated,
+        }
 
     delta_keys = (
         ("mean_total", "mean_total"),
@@ -148,21 +170,19 @@ def main(
         ("prev_amount", "prev_amount_correct_mean"),
         ("pass_all_pct", "pass_all_pct"),
     )
-    typer.echo("\n=== delta (gated - ungated) ===")
-    for label, key in delta_keys:
-        u = agg_ungated.get(key, 0.0)
-        g = agg_gated.get(key, 0.0)
-        typer.echo(f"  {label:18s} {u:>8.3f} -> {g:>8.3f}   delta={g - u:+.3f}")
+    typer.echo("\n=== delta vs ungated ===")
+    typer.echo(f"  {'threshold':<10} " + " ".join(f"{k:>11}" for k, _ in delta_keys))
+    for t in threshold_list:
+        agg_gated = per_threshold[str(t)]["agg"]
+        deltas = [agg_gated.get(key, 0.0) - agg_ungated.get(key, 0.0) for _, key in delta_keys]
+        typer.echo(f"  {t:<10.2f} " + " ".join(f"{d:>+11.3f}" for d in deltas))
 
     out_payload = {
         "lora_path": str(lora_path),
         "gate_path": str(gate_path),
-        "threshold": threshold,
         "n_heldout": n,
-        "n_flagged": n_flagged,
-        "gate_flag_rate": n_flagged / n if n else 0.0,
         "ungated": agg_ungated,
-        "gated": agg_gated,
+        "thresholds": per_threshold,
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(out_payload, indent=2, default=str))
