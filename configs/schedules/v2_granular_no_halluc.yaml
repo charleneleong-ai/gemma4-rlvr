@@ -1,0 +1,78 @@
+# V2 granular no_halluc — A100 PCIe 80GB, train_v2_80gb preset, NEW dataset.
+#
+# E17-E20 confirmed reward-weighting plateau: ×2 vs ×3 give nearly identical
+# no_halluc (-0.88..-0.91), and f1 even *improved* on long-runs (E18=7.745
+# new high) — but no_halluc barely moved. Three reasons:
+#   1. f1 max=10 dominates dynamic range even at no_halluc×3.
+#   2. Binary reward has no slope between K/N partial wins (+1 if all valid,
+#      -3 otherwise — same -3 for "3-of-4 hallucinated" and "0-of-4 valid").
+#   3. GRPO group-normalised advantage has no within-group spread when all
+#      16 samples hallucinate identically — gradient direction is undefined.
+#
+# Granular reward fixes (2) and (3): -1.0 + 2.0×(n_valid/n_total) gives a
+# smooth slope, so partial-win generations get higher reward than fully-bad
+# ones in the same group → real within-group gradient signal.
+#
+# This sweep tests SHAPE alone (weight=1.0). If granular alone moves
+# no_halluc materially without dropping f1, we've fixed the rubric. If it
+# helps but only slightly, next sweep stacks granular×2.
+#
+# Comparison anchors (NEW data, weight=1, BINARY):
+#   E15  (anchor, 80 steps):  mean_total=8.78,  f1=7.34,  no_hal=-0.90
+#   E16  (long,  160 steps):  mean_total=9.08,  f1=7.52,  no_hal=-0.92
+#
+# Comparison anchors (NEW data, BINARY ×2 — last sweep's f1 winner):
+#   E17  (×2, 80):    mean_total=8.82,  f1=7.37,  no_hal=-0.91
+#   E18  (×2, 160):   mean_total=9.32,  f1=7.745, no_hal=-0.89  ← f1 high
+#
+# Predicted outcomes:
+#   granular anchor: f1 ≈ E15 (7.3-7.5), no_hal lifts to -0.5..-0.3 if
+#     within-group gradient kicks in; mean_total roughly comparable to E15
+#     (the no_hal lift trades against the binary reward's +1 ceiling).
+#   granular long:   f1 ≈ E16/E18 (7.5-7.7), no_hal lifts further with more
+#     steps; mean_total potentially > E18 if no_hal beats the f1 trade.
+#
+# Verdict matrix:
+#   no_hal lifts to ≥ -0.5 → granular fixed the rubric, run granular×2 next
+#   no_hal lifts but only to ~-0.7 → granular helps, stack with weight ×2
+#   no_hal stays ≤ -0.85 → shape didn't matter, problem is the data not
+#     the reward. Pivot to encoder-outlier or data-distribution moves.
+#
+# ETA: anchor ~75min + long-run ~85min + 2× eval ~30min ≈ 3-3.5h total.
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  # 1. ANCHOR — granular shape, weight=1.0, 80 steps. vs E15 (binary 8.78).
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--no-halluc-mode"
+      - "granular"
+    description: "lr=5e-6 + new data + no_halluc=granular×1 (anchor — vs E15's 8.78/7.34/-0.90)"
+
+  # 2. LONG-RUN — granular shape, weight=1.0, 160 steps. vs E16/E18.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--no-halluc-mode"
+      - "granular"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + new data + no_halluc=granular×1 + max_steps=160 (vs E18's 9.32/7.745/-0.89)"

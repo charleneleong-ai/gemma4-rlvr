@@ -724,17 +724,53 @@ _SINGLE_WEIGHTS = {
     Trigger.Exemption_Expiry: 7,
 }
 
+# Distribution of target-set sizes — realistic skew for v2 regeneration.
+# Most rows are 1-3 triggers; 4+ kept as a thin robustness tail.
+# Was: hardcoded 5% no-triggers + 80% single + 15% pair (zero 3+).
+_SIZE_WEIGHTS = {
+    1: 0.45,
+    2: 0.30,
+    3: 0.20,
+    4: 0.04,
+    5: 0.01,
+}
+
+# First_DDR requires ≤1 prior DD; Manual_reduction and Exemption_Expiry both
+# require prior DDs. So First_DDR cannot coexist with either. Used by the
+# multi-trigger sampler to reject structurally-incompatible combos.
+_FIRST_DDR_INCOMPAT = {Trigger.Manual_reduction, Trigger.Exemption_Expiry}
+
 
 def _sample_target_set(rng: random.Random) -> Set[Trigger]:
-    roll = rng.random()
-    if roll < 0.05:
-        return {Trigger.No_triggers_identified}
-    if roll < 0.85:
+    size = rng.choices(
+        list(_SIZE_WEIGHTS.keys()),
+        weights=list(_SIZE_WEIGHTS.values()),
+        k=1,
+    )[0]
+
+    if size == 1:
+        # Within the size=1 bucket, ~5% are the "No triggers identified"
+        # sanity baseline; the rest sample from _SINGLE_WEIGHTS.
+        if rng.random() < 0.05:
+            return {Trigger.No_triggers_identified}
         triggers = list(_SINGLE_WEIGHTS.keys())
         weights = [_SINGLE_WEIGHTS[t] for t in triggers]
         return {rng.choices(triggers, weights=weights, k=1)[0]}
-    pair = rng.sample(_NON_TERMINAL_TRIGGERS, 2)
-    return set(pair)
+
+    # Size >= 2: rejection-sample to respect First_DDR's structural rule.
+    # Combinatorial counts: 13 valid 2-combos, 13 valid 3-combos,
+    # 6 valid 4-combos, exactly 1 valid 5-combo.
+    for _ in range(20):
+        candidate = set(rng.sample(_NON_TERMINAL_TRIGGERS, size))
+        if (Trigger.First_DD_review_since_account_start in candidate
+                and candidate & _FIRST_DDR_INCOMPAT):
+            continue
+        return candidate
+    # Fallback: exclude First_DDR from the pool. Guarantees a valid combo
+    # for any size up to 5 (the 5 remaining triggers compose freely).
+    pool = [t for t in _NON_TERMINAL_TRIGGERS
+            if t != Trigger.First_DD_review_since_account_start]
+    return set(rng.sample(pool, size))
 
 
 def build_dataset(n: int = 1000, seed: int = 42) -> List[Dict[str, Any]]:
@@ -775,27 +811,26 @@ def _self_check() -> None:
     rng = random.Random(0)
     tested = 0
     skipped = 0
-    for size in (1, 2):
+    for size in (1, 2, 3, 4, 5):
         for combo in itertools.combinations(_NON_TERMINAL_TRIGGERS, size):
             target = set(combo)
+            # Skip structurally-incompatible combos (First_DDR clashes with
+            # Manual_reduction or Exemption_Expiry — see _FIRST_DDR_INCOMPAT).
+            if (Trigger.First_DD_review_since_account_start in target
+                    and target & _FIRST_DDR_INCOMPAT):
+                skipped += 1
+                continue
             try:
                 generate_dd_example(target, rng)
                 tested += 1
             except AssertionError as e:
-                # First_DDR + (Manual_reduction | Exemption_Expiry) are
-                # structurally incompatible — First_DDR requires ≤1 prior DD.
-                if Trigger.First_DD_review_since_account_start in target and (
-                    target & {Trigger.Manual_reduction, Trigger.Exemption_Expiry}
-                ):
-                    skipped += 1
-                    continue
                 raise RuntimeError(f"Drift for target={target}: {e}")
     generate_dd_example({Trigger.No_triggers_identified}, rng)
     tested += 1
     print(f"Self-check: {tested} combinations OK, {skipped} structurally skipped.")
 
 
-_GENERATOR_VERSION = "1.0.0"
+_GENERATOR_VERSION = "2.0.0"
 
 
 def _summarise_triggers(rows: List[Dict[str, Any]]) -> Dict[str, int]:

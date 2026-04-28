@@ -1,0 +1,63 @@
+# V2 data-regen sweep — A100 PCIe 80GB, train_v2_80gb preset.
+#
+# Tests the data-side hypothesis from docs/ceiling-diagnosis-2026-04-27.md:
+# does adding 3+ trigger examples lift f1's absolute ceiling past ~7.5?
+#
+# Setup vs prior sweeps:
+#   - Dataset: dd_dataset_20260427T201521Z_5500rows.jsonl (generator v2.0.0)
+#     New trigger-count distribution:
+#       size 1: 45%   (was 87%)
+#       size 2: 30%   (was 13%)
+#       size 3: 20%   (was  0%)
+#       size 4:  4%   (was  0%)
+#       size 5:  1%   (was  0%)
+#   - Rubric: REVERTED to uncapped (2026-04-26-soften-well-formed) so this
+#     directly compares to E1 champion (mean_total=9.611, f1=7.45).
+#     E14 showed rubric softening makes f1 a trade-off variable; we want
+#     the data-side ceiling tested without that confounding.
+#
+# Predicted outcomes:
+#   - If f1 > 7.5: data-side ceiling was the binding constraint. Diagnosis
+#     confirmed. Multi-trigger gradient signal unlocked recall.
+#   - If f1 ≈ 7.5: data wasn't the binding constraint. Next levers are
+#     LoRA target_modules expansion to MLP, or base-model swap.
+#   - If f1 < 7.5: harder data is hurting; reconsider the distribution
+#     (maybe drop sizes 4-5 entirely, simpler 1-3 split).
+#
+# Total runtime: ~3h.
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  # 1. ANCHOR — direct comparison vs E1 (lr=5e-6, mean_total=9.611, f1=7.45).
+  # Same stack, same rubric, same lr. Only the data has changed.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+    description: "lr=5e-6 + new dataset (v2.0.0 distribution) — anchor vs E1's 9.611"
+
+  # 2. LONG-RUN — let the model train past the plateau. The new data has
+  # ~1100 3-trigger and ~280 4-5-trigger rows the model has never seen;
+  # longer training may be needed to internalise the multi-label patterns.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "lr=5e-6 + new dataset + max_steps=160 — long-run on multi-trigger"

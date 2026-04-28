@@ -23,17 +23,16 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-04-27-cap-neg-tails-v2"
+RUBRIC_VERSION = "2026-04-26-soften-well-formed"
 
-# Negative-tail caps for the two penalty-heavy rewards. v2_step_time_relax
-# confirmed the v2 mean_total ceiling at ~9.6 is structural — the
-# `no_hallucinated_facts` and `prev_amount_correct` rewards were dragging
-# the mean by ~1 point each via their -3 failure mode. Capping the failure
-# at -1 preserves the gradient signal (model still penalised for hallucination)
-# but stops the negative tail from masking actual learning gains. f1_triggers
-# (max 10) remains the dominant lever.
-NO_HALLUC_FAIL_SCORE = -1.0     # was -3.0 in 2026-04-26 rubric
-PREV_AMOUNT_FAIL_SCORE = -1.0   # was -3.0 in 2026-04-26 rubric
+# Reverted to the uncapped rubric (matching E1 champion) for the data-regen
+# experiment. Rationale: E14 showed that capping the no_halluc penalty makes
+# f1 a trade-off variable — the model retreats from f1 to gain ground on
+# no_halluc. To isolate whether the new multi-trigger data lifts f1's
+# absolute ceiling, we need the original gradient pressure restored.
+# (See docs/ceiling-diagnosis-2026-04-27.md "Decision" section.)
+NO_HALLUC_FAIL_SCORE = -3.0
+PREV_AMOUNT_FAIL_SCORE = -3.0
 
 
 # =============================================================================
@@ -214,6 +213,55 @@ def reward_no_hallucinated_facts(completions, input_json, **kwargs) -> List[floa
     return scores
 
 
+def reward_no_hallucinated_facts_granular(completions, input_json, **kwargs) -> List[float]:
+    """Per-fact partial credit variant of `reward_no_hallucinated_facts`.
+
+    Fixes the binary reward problem: original returns +1 / -3 for any-invalid /
+    all-valid, identical for "3-of-4 valid" and "0-of-4 valid". This gives no
+    within-group gradient under GRPO when most generations hallucinate.
+
+    Granular score = -1.0 + 2.0 × (n_valid / n_total). Range [-1, +1], smooth
+    between the extremes. "No citations" returns +1 (full credit, no
+    hallucination opportunity). Empty completion returns 0.
+    """
+    scores: List[float] = []
+    for c, inp in zip(completions, input_json):
+        text = _extract_text(parse_response(c[0]["content"]))
+        if not text:
+            scores.append(0.0)
+            continue
+        tariffs = {
+            (ch.get("tariff_name", "") or "").lower()
+            for ch in inp["account_context"].get("contract_history", []) or []
+        }
+        real_pcts: List[float] = []
+        for ch in inp["account_context"].get("contract_history", []) or []:
+            for rh in ch.get("contract_rates_history", []) or []:
+                for rate in rh.get("rates", []) or []:
+                    v = rate.get("change_since_previous_rate_percent")
+                    if v is not None:
+                        real_pcts.append(float(v))
+
+        cited_tariffs = [m.group(1).strip().lower() for m in _TARIFF_RE.finditer(text)]
+        cited_pcts = [
+            float(m.group(1)) for m in _PERCENT_RE.finditer(text)
+            if abs(float(m.group(1))) >= 1.0
+        ]
+        n_total = len(cited_tariffs) + len(cited_pcts)
+        if n_total == 0:
+            scores.append(1.0)
+            continue
+        n_valid = sum(
+            1 for cited in cited_tariffs
+            if any(cited in t or t in cited for t in tariffs if t)
+        ) + sum(
+            1 for pct in cited_pcts
+            if any(abs(pct - rp) <= 0.5 for rp in real_pcts)
+        )
+        scores.append(-1.0 + 2.0 * (n_valid / n_total))
+    return scores
+
+
 def reward_underpayment_language_constrained(completions, input_json, **kwargs) -> List[float]:
     """Targets failure category: 'AI uses underpayment language inappropriately'.
     Only allowed when a prior DDChange has
@@ -280,6 +328,25 @@ def reward_explanations_well_formed(completions, **kwargs) -> List[float]:
 # =============================================================================
 # Canonical bundle for GRPOTrainer
 # =============================================================================
+
+
+def make_weighted_no_halluc(weight: float, base_fn=None):
+    """Factory for a weighted no_halluc reward. weight=1.0 returns base_fn
+    untouched; otherwise multiplies every score by `weight`.
+
+    base_fn defaults to `reward_no_hallucinated_facts` (binary). Pass
+    `reward_no_hallucinated_facts_granular` to weight the granular variant.
+    """
+    if base_fn is None:
+        base_fn = reward_no_hallucinated_facts
+    if weight == 1.0:
+        return base_fn
+
+    def weighted(*args, **kwargs) -> List[float]:
+        return [weight * s for s in base_fn(*args, **kwargs)]
+
+    weighted.__name__ = "reward_no_hallucinated_facts"  # GRPOTrainer logs by name
+    return weighted
 
 
 REWARD_FUNCS = [

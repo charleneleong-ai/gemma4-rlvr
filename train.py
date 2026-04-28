@@ -78,7 +78,10 @@ from dd_explainer_data_generator import (  # noqa: E402
 from dd_explainer_rewards import (  # noqa: E402
     REWARD_FUNCS,
     RUBRIC_VERSION,
+    make_weighted_no_halluc,
     parse_response,
+    reward_no_hallucinated_facts,
+    reward_no_hallucinated_facts_granular,
     score_completion,
 )
 import time  # noqa: E402
@@ -732,6 +735,17 @@ def train(
     wandb_run_name: Optional[str] = typer.Option(
         None, help="Weights & Biases run name. Auto-generated if omitted.",
     ),
+    no_halluc_weight: float = typer.Option(
+        1.0,
+        help="Multiplier on reward_no_hallucinated_facts in GRPO sum (default 1.0). "
+             "Set >1 to put more gradient pressure on hallucination dimension.",
+    ),
+    no_halluc_mode: str = typer.Option(
+        "binary",
+        help="Reward shape: 'binary' (+1/-3 — original) or 'granular' (per-fact "
+             "partial credit, range [-1,+1]). Granular gives within-group gradient "
+             "when most generations hallucinate.",
+    ),
 ) -> None:
     """Run GRPO training with the 7 verifiable rewards from dd_explainer_rewards."""
     # 1. Load Hydra YAML → typed Settings.
@@ -864,10 +878,32 @@ def train(
         run_name=settings.wandb.run_name,
     )
 
+    # Compose the no_halluc reward function from --no-halluc-mode + --no-halluc-weight.
+    # binary  + weight=1: original (+1/-3)
+    # binary  + weight≠1: original ×weight
+    # granular + any weight: granular ×weight (range [-1,+1] × weight)
+    reward_funcs = list(REWARD_FUNCS)
+    if no_halluc_mode == "granular":
+        base_fn = reward_no_hallucinated_facts_granular
+    elif no_halluc_mode == "binary":
+        base_fn = reward_no_hallucinated_facts
+    else:
+        raise typer.BadParameter(f"--no-halluc-mode must be 'binary' or 'granular', got {no_halluc_mode!r}")
+
+    if no_halluc_weight != 1.0:
+        nh_fn = make_weighted_no_halluc(no_halluc_weight, base_fn=base_fn)
+        typer.echo(f"[train] no_halluc reward: mode={no_halluc_mode} ×{no_halluc_weight}")
+    else:
+        nh_fn = base_fn
+        if no_halluc_mode != "binary":
+            typer.echo(f"[train] no_halluc reward: mode={no_halluc_mode}")
+    idx = reward_funcs.index(reward_no_hallucinated_facts)
+    reward_funcs[idx] = nh_fn
+
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
-        reward_funcs=REWARD_FUNCS,
+        reward_funcs=reward_funcs,
         args=training_args,
         train_dataset=dataset,
         callbacks=callbacks,
