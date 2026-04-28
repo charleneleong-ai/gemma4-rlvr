@@ -98,19 +98,29 @@ Adding 3+ trigger examples does three things at once:
 
 Approx 5500 rows total (preserves dataset size; substitutes hard for easy).
 
-## Decision (updated post-E16)
+## Decision (updated post-E22 — reward-side exhausted)
 
-The data-side hypothesis was correct: f1 climbed from 7.45 (E1, old data) to **7.52 (E16, new data)** — first config across 17 experiments to break 7.5. But mean_total stayed at 9.08 (below E1's 9.611) because the harder dataset triggers MORE hallucination (no_halluc -0.33 → -0.92).
+The data-side hypothesis was correct: f1 climbed from 7.45 (E1, old data) to **7.745 (E18, new data + binary×2 long-run)** — branch high across 22 experiments. But mean_total stayed at 9.32 (below E1's 9.611) because the harder dataset triggers MORE hallucination (no_halluc -0.33 → -0.88..-0.92, stuck across every reward variant tried).
 
-The mean_total ceiling has now been mapped to a **multi-knob equilibrium**:
-- Data composition controls f1's absolute ceiling
-- Rubric weights control where the model lands on the f1 ↔ {no_halluc, well_formed} trade ridge
-- Multi-fact contexts in harder data introduce new hallucination failure modes the model hasn't learned to handle
+Three sweeps on the new data have now mapped the reward landscape:
 
-**Next move — push hallucination out of the model.** The reward landscape can't simultaneously incentivize high recall AND low hallucination on multi-fact contexts. The encoder-outlier idea (see "Deferred future approaches" below) bypasses this by routing OOD inputs to a structured "insufficient context" response instead of running the LLM at all. That moves the no_halluc problem out of the equilibrium entirely.
+| sweep | best mean_total | best f1 | best no_halluc |
+|---|---|---|---|
+| binary ×1 (E15-E16) | 9.082 (E16) | 7.523 (E16) | -0.920 (E16) |
+| binary ×{2,3} (E17-E20) | 9.324 (E18) | **7.745 (E18)** ⭐ | -0.884 (E20) |
+| granular ×1 (E21-E22) | 8.933 (E22) | 7.459 (E22) | -0.896 (E22) |
+
+`no_halluc` is **plateau'd at -0.88..-0.92** across every reward weight (×1, ×2, ×3) AND every reward shape (binary +1/-3, granular -1+2·n_valid/n_total). The granular hypothesis was that within-group gradient signal would lift no_halluc — that was wrong: hallucination is too uniform across the 16 generations for the granular slope to activate. f1 dropped slightly under granular (7.459 vs 7.745 at binary×2).
+
+**Verdict: reward-side levers are exhausted on this dataset.** The mean_total ceiling is a **multi-knob equilibrium** with the reward-shaping knobs tapped out:
+- Data composition controls f1's absolute ceiling (✓ broken — 7.745 from 7.45)
+- Rubric weights control where the model lands on the f1 ↔ {no_halluc, well_formed} trade ridge (✗ exhausted)
+- Multi-fact contexts trigger hallucination failures the LLM cannot learn around with reward gradient alone
+
+**Next move — push hallucination out of the model.** The encoder-outlier idea (see "Deferred future approaches" below) bypasses the trade by routing OOD inputs to a structured "insufficient context" response instead of running the LLM. That moves the no_halluc problem out of the equilibrium entirely.
 
 Other deferrable levers if encoder approach blocked:
-- LoRA `target_modules` expansion to MLP (capacity for arithmetic — `prev_amount` still stuck at 0)
+- LoRA `target_modules` expansion to MLP (capacity for arithmetic — `prev_amount` still stuck at 0 across E22)
 - Base-model swap to a stronger-grounded foundation
 - Train-time data augmentation: pair multi-fact contexts with explicit "do not invent facts not in context" instruction
 
@@ -123,6 +133,12 @@ Other deferrable levers if encoder approach blocked:
 | E13 (½-capped anchor) | 2026-04-27-cap-neg-tails | old | 9.463 | 7.389 | -0.424 | -0.01 | 22.2% |
 | E14 (½-cap long-run) | 2026-04-27-cap-neg-tails | old | 8.961 | 6.473 | -0.156 | +0.144 | 29.9% |
 | E15 (data-regen anchor) | 2026-04-26-soften-well-formed | new (45/30/20/4/1) | 8.778 | 7.343 | -0.896 | -0.123 | 7.3% |
-| **E16 (data-regen long-run)** | 2026-04-26-soften-well-formed | new | 9.082 | **⭐ 7.523** | **-0.920** | +0.026 | 13.7% |
+| E16 (data-regen long-run) | 2026-04-26-soften-well-formed | new | 9.082 | 7.523 | -0.920 | +0.026 | 13.7% |
+| E17 (binary ×2 anchor) | 2026-04-26-soften-well-formed | new | 8.819 | 7.372 | -0.908 | -0.062 | 9.9% |
+| **E18 (binary ×2 long-run — branch champ)** | 2026-04-26-soften-well-formed | new | **9.324** | **⭐ 7.745** | -0.888 | +0.005 | 13.9% |
+| E19 (binary ×3 anchor) | 2026-04-26-soften-well-formed | new | 8.855 | 7.354 | -0.900 | -0.029 | 9.0% |
+| E20 (binary ×3 long-run) | 2026-04-26-soften-well-formed | new | 9.333 | 7.676 | -0.884 | -0.102 | 8.0% |
+| E21 (granular ×1 anchor) | 2026-04-26-soften-well-formed | new | 8.605 | 7.121 | -0.884 | -0.098 | 6.8% |
+| E22 (granular ×1 long-run) | 2026-04-26-soften-well-formed | new | 8.933 | 7.459 | -0.896 | -0.083 | 10.7% |
 
 W&B project: <https://wandb.ai/chaleong/gemma4-rlvr>
