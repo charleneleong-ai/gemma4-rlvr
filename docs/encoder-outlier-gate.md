@@ -82,6 +82,6 @@ If AUROC ≥ 0.95 but mean_total only nudges to 9.35-9.4, the failure is not dat
 2. **Outlier mutator** (`scripts/build_outlier_set.py`) — emit `data/outlier_set_v0.jsonl` with 200 rows (100 OOD + 100 in-dist), labelled, with the mutation type recorded for diagnosis.
 3. **Encoder training** (`scripts/train_outlier_encoder.py`) — three candidates × AUROC report.
 4. **Eval integration** (`dd_explainer_eval.py`) — gated A/B against E18.
-5. **Writeup** (`docs/experiments/encoder_outlier/v0_gate.md` — note the new top-level `encoder_outlier` since this isn't a `train_v2_80gb` sweep) once results land.
+5. **Writeup** (`docs/experiments/dd_explainer/encoder_outlier/v0_gate.md` — same `dd_explainer` task as the GRPO sweeps, but `encoder_outlier` in the config slot since this isn't a `train_v2_80gb` Gemma run) once results land.
 
 The first three steps should land as separate small PRs against this branch so each can be reviewed independently.
