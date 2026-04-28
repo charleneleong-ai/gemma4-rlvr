@@ -1,7 +1,9 @@
 # `v2_data_regen` — does multi-trigger data lift f1 past 7.5?
 
 **Schedule:** [`configs/schedules/v2_data_regen.yaml`](../../../configs/schedules/v2_data_regen.yaml)
-**Config:** `train_v2_80gb` (Gemma 4 4B, A100 PCIe 80GB)
+**Config:** `train_v2_80gb`
+**Chassis:** `unsloth/gemma-4-E4B-it` · LoRA r=128 · max_seq=8192 · num_generations=16
+**Hardware:** A100 PCIe 80GB
 **Iterations:** E15-E16 (2 iters)
 **Started:** 2026-04-27 19:54 UTC · **Finished:** 2026-04-27 23:00 UTC (3h 06min)
 

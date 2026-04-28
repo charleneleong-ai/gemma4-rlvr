@@ -1,7 +1,9 @@
 # `v2_no_halluc_weighted` — does ×2/×3 reward weighting lift no_halluc?
 
 **Schedule:** [`configs/schedules/v2_no_halluc_weighted.yaml`](../../../configs/schedules/v2_no_halluc_weighted.yaml)
-**Config:** `train_v2_80gb` (Gemma 4 4B, A100 PCIe 80GB)
+**Config:** `train_v2_80gb`
+**Chassis:** `unsloth/gemma-4-E4B-it` · LoRA r=128 · max_seq=8192 · num_generations=16
+**Hardware:** A100 PCIe 80GB
 **Iterations:** E17-E20 (4 iters)
 **Started:** 2026-04-27 23:50 UTC · **Finished:** 2026-04-28 05:20 UTC (5h 30min)
 

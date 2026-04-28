@@ -1,7 +1,9 @@
 # `v2_granular_no_halluc` — does per-fact granular reward lift no_halluc?
 
 **Schedule:** [`configs/schedules/v2_granular_no_halluc.yaml`](../../../configs/schedules/v2_granular_no_halluc.yaml)
-**Config:** `train_v2_80gb` (Gemma 4 4B, A100 PCIe 80GB)
+**Config:** `train_v2_80gb`
+**Chassis:** `unsloth/gemma-4-E4B-it` · LoRA r=128 · max_seq=8192 · num_generations=16
+**Hardware:** A100 PCIe 80GB
 **Iterations:** E21-E22 (2 iters)
 **Started:** 2026-04-28 07:55 UTC · **Finished:** 2026-04-28 10:20 UTC (2h 25min)
 

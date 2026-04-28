@@ -22,6 +22,11 @@ trace from any artefact (results row, schedule yaml, doc) to the other two.
 The autoresearch package emits the skeleton via
 `uv run autoresearch-report --schedule <name> --config <name>` (see
 [`autoresearch.report`](https://github.com/charleneleong-ai/autoresearch/blob/main/src/autoresearch/report.py)).
+The skeleton inlines the schedule yaml, fills in the per-iter results table
+from `results.jsonl`, and **auto-detects the chassis** (model name, LoRA
+rank, max_seq_length, num_generations) from `configs/<config>.yaml` —
+walking the Hydra `defaults:` chain so inherited fields land in the header.
+
 The author fills in:
 
 1. **Hypothesis** — what mechanism are we testing, and what would falsify it?
