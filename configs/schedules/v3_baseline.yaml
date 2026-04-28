@@ -1,0 +1,54 @@
+# V3 baseline — Gemma 4 26B-A4B (MoE) on A100 PCIe 80GB.
+#
+# Establishes v3's mean_total / f1 / no_halluc baseline. Direct comparison
+# vs v2 champion E18 (binary×2 long-run, mean_total=9.324, f1=7.745,
+# no_halluc=-0.888) — same dataset, same rubric, same GRPO recipe. Only
+# the base model changed.
+#
+# Hypothesis: 26B parameters with 4B-active sparse activation gives the
+# experts enough capacity to (a) reliably do the JSON-traversal arithmetic
+# that 4B never could (`prev_amount_correct=0` across 22 v2 experiments),
+# and (b) hold more facts in working memory simultaneously, reducing the
+# uniform `no_halluc` plateau at -0.88..-0.92.
+#
+# Falsifiable: if v3_baseline long-run mean_total < 9.5, the 6.5×
+# parameter bump is not enough to move the metrics on this task — we'd
+# either need a non-Gemma swap, much bigger LoRA, or accept that the
+# rubric itself is the bottleneck (f1's 0-10 range trades poorly with
+# no_halluc's ±2 range).
+#
+# Step time at 26B-A4B is ~150-200s (vs v2's ~75-95s) — anchor takes
+# ~3-4h, long-run ~5-7h. Total sweep ~9-11h. Run as overnight detached.
+
+common_overrides:
+  - "--eval-batch-size"
+  - "16"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  # 1. ANCHOR — 80 steps. Direct vs E15 (v2 anchor mean_total=8.78).
+  - config: train_v3_26b_a4b
+    overrides:
+      - "--learning-rate"
+      - "1.0e-5"
+    description: "26B-A4B v3 baseline anchor (vs v2 E15 8.78/7.34/-0.90 — same data)"
+
+  # 2. LONG-RUN — 160 steps. Direct vs E18 (v2 champion mean_total=9.324).
+  - config: train_v3_26b_a4b
+    overrides:
+      - "--learning-rate"
+      - "1.0e-5"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "26B-A4B v3 baseline long-run (vs v2 E18 champion 9.324/7.745/-0.888)"
