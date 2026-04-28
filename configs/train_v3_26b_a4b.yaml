@@ -5,21 +5,33 @@
 # latency stays ~4B-class; capability is 26B-class. Reasoning behind the
 # swap in `docs/v3-26b-a4b-migration.md`.
 #
-# Cumulative changes vs train_v2_80gb:
-#   - model_name:    unsloth/gemma-4-E4B-it -> unsloth/gemma-4-26B-A4B-it
-#   - load_in_4bit:  false -> true   (26B BF16 = 52 GB; 4-bit = 13 GB + LoRA + KV
-#                                     fits comfortably on 80 GB)
-#   - lora_rank:     128 -> 256      (more LoRA capacity for the experts' MLPs)
-#   - batch_size:    8 -> 4          (per-rollout memory ~2x with 26B forward)
-#   - grad_accum:    2 -> 4          (keeps effective grad batch = 16 unchanged)
-#   - num_generations: stays 16      (still divides batch_size * grad_accum)
-#   - max_seq_length: 8192           (unchanged — full regression-trace coverage)
+# **Memory budget on 80GB is genuinely tight** for 26B-A4B GRPO. Two smoke
+# attempts OOM'd before this config landed:
+#
+#   attempt 1 (planned): batch=4, grad_accum=4, num_gen=16, max_seq=8192,
+#                        lora_r=256                  → OOM at 78.57/79.25 GB
+#   attempt 2 (relaxed): batch=2, grad_accum=4, num_gen=8,  max_seq=6144,
+#                        lora_r=128                  → OOM at 78.65/79.25 GB
+#                        (deep in MoE LoRA forward)
+#   attempt 3 (THIS):    batch=1, grad_accum=4, num_gen=4,  max_seq=4096,
+#                        lora_r=64, max_completion=512
+#
+# The MoE LoRA forward materializes per-expert deltas per token — fundamentally
+# memory-hungry vs dense LoRA. KV cache during rollout dominates: at batch=B,
+# num_gen=G, max_seq=S, you're holding B*G concurrent KV caches of length S.
+# At batch=1 num_gen=4, that's 4 KV caches — ~20-25 GB at 4096 tokens — leaves
+# 30+ GB headroom for forward activations + LoRA expert deltas.
+#
+# Effective GRPO group: batch * grad_accum = 4 rollouts per grad step,
+# num_generations=4 means 1 prompt × 4 rollouts (vs v2's 1 prompt × 16).
+# Group size = 4 is the lower bound where GRPO advantage estimates still
+# carry signal; smaller and the variance-reduction benefit collapses.
 #
 # Step time: expect ~150-200s on PCIe 80GB. Training is ~2-3x slower per step
 # than v2 because the 26B base is bigger even with sparse activation, and the
-# LoRA-on-experts gradient is over more params. Eval throughput is ~2x slower
-# (more weights to forward through). Keep `--max-steps 80` for autoresearch
-# iters; full long-runs at 160 will take 5-7 hours.
+# LoRA-on-experts gradient flows through more params. Eval throughput is ~2x
+# slower (more weights to forward through). Keep `--max-steps 80` for
+# autoresearch iters; full long-runs at 160 will take 5-7 hours.
 #
 # Inference target: L4 GPU on Cloud Run with INT8 quantization.
 #   - 26B INT8 weights ~ 13 GB   - leaves 8-10 GB on L4 for KV + batch=4-8
@@ -35,29 +47,30 @@ train:
   # Model: Gemma 4 26B-A4B MoE (26B total, 4B active/tok)
   model_name: unsloth/gemma-4-26B-A4B-it
 
-  # Memory: 4-bit base is required at 26B even on 80 GB. LoRA gets applied
-  # to the experts' MLPs (Unsloth handles MoE LoRA natively).
+  # Memory: 4-bit base + r=64 LoRA. The MoE expert-LoRA forward path is
+  # memory-hungry; even r=128 + batch=2 + num_gen=8 OOM'd. r=64 halves
+  # LoRA params and the per-expert delta materialization cost.
   load_in_4bit: true
-  lora_rank: 256
-  max_seq_length: 8192
-  max_completion_length: 1024
+  lora_rank: 64
+  max_seq_length: 4096
+  max_completion_length: 512
 
-  # GRPO: keep group size = effective_batch (= 16). Drop batch_size to fit
-  # the bigger forward, bump grad_accum to compensate.
+  # GRPO: minimum viable. batch=1 means 1 prompt per grad step with
+  # num_generations=4 rollouts. Group size of 4 is the floor where GRPO
+  # advantage normalisation still carries useful variance-reduction signal.
   # Constraint: (batch_size * grad_accum) % num_generations == 0
-  # 4 * 4 = 16, divisible by num_generations=16. One unique prompt per
-  # grad step with 16 rollouts.
-  batch_size: 4
+  # 1 * 4 = 4, divisible by num_generations=4. ✓
+  batch_size: 1
   grad_accum: 4
-  num_generations: 16
+  num_generations: 4
 
   # Optimizer: keep v2-best defaults until v3 sweep 2 explores
   learning_rate: 1.0e-5
   beta: 0.04
   weight_decay: 0.001
 
-  # Eval: smaller bs because 26B forward is 2x heavier
-  eval_batch_size: 16
+  # Eval: bs=4 — 26B forward at this seq length is heavy
+  eval_batch_size: 4
   eval_heldout_n: 1000
   eval_regression_n: 100
 
