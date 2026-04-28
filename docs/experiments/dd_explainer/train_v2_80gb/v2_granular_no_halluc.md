@@ -1,6 +1,6 @@
 # `v2_granular_no_halluc` — does per-fact granular reward lift no_halluc?
 
-**Schedule:** [`configs/schedules/v2_granular_no_halluc.yaml`](../../../configs/schedules/v2_granular_no_halluc.yaml)
+**Schedule:** [`configs/schedules/v2_granular_no_halluc.yaml`](../../../../configs/schedules/v2_granular_no_halluc.yaml)
 **Config:** `train_v2_80gb`
 **Chassis:** `unsloth/gemma-4-E4B-it` · LoRA r=128 · max_seq=8192 · num_generations=16
 **Hardware:** A100 PCIe 80GB
@@ -45,7 +45,7 @@ iters:
 CLI plumbing: `--no-halluc-mode {binary, granular}` selects the base reward
 function; `--no-halluc-weight` (kept from the previous sweep) wraps either
 variant. See
-[`dd_explainer_rewards.reward_no_hallucinated_facts_granular`](../../../dd_explainer_rewards.py).
+[`dd_explainer_rewards.reward_no_hallucinated_facts_granular`](../../../../dd_explainer_rewards.py).
 
 ## Pre-launch comparisons
 
@@ -87,6 +87,6 @@ granular) all converge to the same equilibrium.
 
 The pivot is to **stop trying to teach the LLM not to hallucinate** and add a
 gate in front of it that decides whether it should answer at all. Plan in
-[`docs/ceiling-diagnosis-2026-04-27.md`](../../ceiling-diagnosis-2026-04-27.md#next-move--encoder-outlier-suppression).
+[`docs/ceiling-diagnosis-2026-04-27.md`](../../../ceiling-diagnosis-2026-04-27.md#next-move--encoder-outlier-suppression).
 
 E18 (binary×2, 160 steps) remains the branch champion at 9.324 / 7.745 / -0.888.
