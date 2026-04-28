@@ -242,6 +242,77 @@ No schema changes, no rubric changes, no Gemma re-train. The rubric scores the f
 
 Whether wiring this in lifts E18's gated `mean_total` past 9.5 depends on what fraction of the heldout's `no_halluc` cost comes from inputs the gate flags. **The gated A/B (build sequence step 4) is the definitive test.**
 
+## Gated A/B — verdict (falsified)
+
+**Setup:** E18's saved adapter on the n=1000 heldout (seed=42, same split as the
+training-time eval). Generate completions once, score every row two ways
+(LLM completion vs. fallback substitution for OOD-flagged rows). 4-bit
+quantised inference for memory headroom — drops absolute mean_total ~1.0
+vs. E18's published 9.324, but the relative deltas are still apples-to-apples.
+
+| threshold | n_flagged | mean_total | Δmt | f1 | Δf1 | no_halluc | Δnh |
+|---|---|---|---|---|---|---|---|
+| **ungated** | 0 | **8.317** | — | 6.619 | — | -0.812 | — |
+| 0.5 | 176 (17.6%) | 7.362 | **-0.955** | 5.246 | -1.373 | -0.476 | **+0.336** |
+| 0.7 | 23 (2.3%) | 8.204 | -0.113 | 6.462 | -0.157 | -0.776 | +0.036 |
+| 0.85 | 1 (0.1%) | 8.308 | -0.009 | 6.610 | -0.009 | -0.812 | +0.000 |
+| 0.95 | 0 | 8.317 | +0.000 | 6.619 | +0.000 | -0.812 | +0.000 |
+
+**Headline:** the gate lifts `no_halluc` as predicted (+0.336 at threshold=0.5)
+but `mean_total` *drops* at every threshold. Falsified.
+
+### Why — the rubric-weight math
+
+The GRPO reward sum has `f1_triggers` capped at +10 (range [-2, +10], 12-wide)
+and `no_hallucinated_facts` capped at +1 (range [-3, +1], 4-wide). Substituting
+the fallback response on an OOD-flagged row:
+
+- **costs f1**: an LLM that scored 6.6 average f1 → fallback that scores 0
+  (no triggers identified). Per row that's 6.6 lost.
+- **gains no_halluc**: an LLM that scored -0.81 average → fallback that scores
+  +1 (no citations to validate). Per row that's 1.81 gained.
+
+f1's bigger range × bigger weight means **net loss per gated row ≈ -4.8 in the rubric sum**, before the rest of the rubric. Even when the gate is right (it correctly flags genuinely-bad inputs), the rubric makes substitution always lose.
+
+### What the gate *did* prove
+
+✓ **OOD detection works**. AUROC ≥ 0.97 on all five realistic mutations; the
+flagged rows really are unusual (bimodal score distribution — most rows < 0.3,
+a small "really weird" tail > 0.7).
+
+✓ **`no_halluc` IS partly an OOD problem**. +0.336 lift at threshold=0.5 is
+real signal — the gate correctly identifies inputs Gemma fabricates against.
+This is the first lever that *moves* `no_halluc` past the -0.88..-0.92 plateau.
+
+✗ **`mean_total` is f1-bound, not no_halluc-bound**, on this heldout. The
+v2 dataset's inputs are 99%+ in-distribution; the LLM hallucinates *uniformly*
+across them, not concentrated on weird tail rows. Gating is a fix-the-tail
+move on a problem that lives in the body.
+
+### Conclusion
+
+The gate works as a component but isn't the v2 ceiling-breaker. Three implications:
+
+1. **For `mean_total`**: pivot to base-model swap or larger-LoRA training to
+   get a model that grounds better on the *typical* row, not just the weird ones.
+2. **For `no_halluc` standalone**: if downstream consumers care more about
+   "doesn't hallucinate" than "got the right trigger" (e.g. the production
+   dd_explainer where a wrong cite is reputationally worse than a missed one),
+   gating at threshold=0.5 with a custom rubric weighting (f1×0.5, no_halluc×3)
+   would land on a different equilibrium worth re-running.
+3. **For production routing**: the gate is still useful as an inference-time
+   pre-flight, just not as a way to win on the GRPO benchmark. A flagged row
+   that gets routed to "manual review" *before* Gemma generates is correct
+   product behaviour even if the rubric scores it as f1=0 — the rubric isn't
+   the right metric for that path.
+
+### Branch status
+
+E18 (binary×2, 160 steps) remains the v2 champion at 9.324 / 7.745 / -0.888.
+The encoder-outlier-gate branch lands as documented infrastructure (gate API,
+v0/v1 training, gated A/B harness) without claiming a new headline result on
+mean_total. Next-move thread: base-model swap or rubric-reweighting eval.
+
 ## Out of scope for this branch
 
 - Production routing — this is just train + eval gating to validate the hypothesis.
