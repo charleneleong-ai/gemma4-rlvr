@@ -21,16 +21,18 @@ If a small frozen encoder can separate in-distribution account contexts from obv
 
 ### 1. Outlier dataset (`scripts/build_outlier_set.py`)
 
-Mutate ~100 real account contexts in obvious ways. These are positive OOD examples:
+Mutate ~100 real account contexts. The set covers **two flavours of OOD**: synthetic (clearly broken JSON / impossible values) and **domain-realistic** (legitimate but tail-extreme — high-debt customers, big DD jumps that production sees but training doesn't).
 
-| Mutation | Failure it triggers |
-|---|---|
-| Drop `contract_history` entirely | LLM has no tariff names to cite — fabricates one |
-| Replace tariff names with gibberish (`"zXq42_payg"`) | LLM ignores the gibberish, invents a real name |
-| Set numeric `dd_amount` / rate fields to NaN / negative | LLM hallucinates plausible-looking numbers |
-| Empty `dd_change_history` on a context that needs prior amount | LLM invents a previous amount |
-| Wildly inconsistent dates (end < start) | Reasoning failure, often invents a remediation |
-| Truncate `payment_history` to 1 row | LLM extrapolates a pattern from one data point |
+| Mutation | Flavour | Failure it triggers |
+|---|---|---|
+| Drop `contract_history` entirely | synthetic | LLM has no tariff names to cite — fabricates one |
+| Replace tariff names with gibberish (`"zXq42_payg"`) | synthetic | LLM ignores the gibberish, invents a real name |
+| Set numeric `dd_amount` / rate fields to negative | synthetic | LLM hallucinates plausible-looking numbers |
+| Empty `dd_change_history` on a context that needs prior amount | synthetic | LLM invents a previous amount |
+| Wildly inconsistent dates (end < start) | synthetic | Reasoning failure, often invents a remediation |
+| Truncate `payment_history` to 1 row | synthetic | LLM extrapolates a pattern from one data point |
+| **Very large debt** (×4-8 multiplier on `dd_amount` — ~£500-£1700) | **realistic** | Synthetic distribution has p99=£211 / max=£219; production sees high-usage / commercial / arrears customers. LLM fabricates explanations for unfamiliar magnitudes. |
+| **Significant increase** (`dd_amount_change` £150-£300) | **realistic** | Synthetic max is ±£40; real price-cap moves and tariff resets can jump 5×. LLM invents a cause that doesn't match context. |
 
 For negatives: 100 in-distribution rows sampled from `data/dd_dataset_20260427T201521Z_5500rows.jsonl` with a fixed seed. 50/50 split for train, plus a held-out 50/50 split for AUROC.
 
@@ -81,34 +83,45 @@ seed=42. ~30s end-to-end on the A100. Reproduce with
 
 | split | AUROC |
 |---|---|
-| train | 0.870 |
-| **heldout (overall)** | **0.786** |
+| train | 0.805 |
+| **heldout (overall)** | **0.717** |
+
+The overall metric is dragged down by the harder mutations — see the
+per-flavour breakdown below for the load-bearing signal.
 
 ### Per-mutation heldout AUROC
 
-| mutation | AUROC | encoder picks up |
-|---|---|---|
-| `drop_contract_history` | **1.000** | empty array → JSON shape change |
-| `empty_dd_change_history` | **1.000** | empty array → JSON shape change |
-| `broken_dates` | 0.931 | `1970-01-01` strings stand out vs. real dates |
-| `gibberish_tariff_names` | 0.757 | `zxq42_payg` reads unlike English brand names |
-| `negative_numerics` | 0.409 | ✗ pretrained encoder has no "DD should be positive" prior |
-| `truncate_payment_history` | 0.414 | ✗ shorter array is structurally legal — no signal |
+| mutation | flavour | AUROC | encoder picks up |
+|---|---|---|---|
+| `drop_contract_history` | synthetic | **1.000** | empty array → JSON shape change |
+| `empty_dd_change_history` | synthetic | **1.000** | empty array → JSON shape change |
+| `broken_dates` | synthetic | **1.000** | `1970-01-01` strings stand out vs. real dates |
+| `large_debt` | **realistic** | 0.697 | partial — £740 is lexically uncommon vs. £140-ish norm |
+| `gibberish_tariff_names` | synthetic | 0.616 | `zxq42_payg` reads unlike English brand names |
+| `negative_numerics` | synthetic | 0.517 | ✗ no "DD should be positive" prior |
+| `significant_increase` | **realistic** | 0.507 | ✗ £200 jump is lexically normal, structurally fine |
+| `truncate_payment_history` | synthetic | 0.450 | ✗ shorter array is structurally legal |
 
 ### Verdict (v0)
 
-✓ **Structural OOD is solved.** Empty arrays and broken dates score AUROC ≥ 0.93
+✓ **Structural OOD is solved.** Empty arrays and broken dates score AUROC = 1.000
 without any feature engineering — the pretrained encoder already separates them.
 
-✗ **Semantic / domain-numeric OOD is not.** Negative DD amounts and a
-1-row payment_history are well-formed JSON; the encoder has no domain
-rule saying these are anomalous. AUROC barely above 0.4 (worse than
-chance, the linear head is *anti-correlating*).
+~ **Domain-magnitude OOD is partially solved.** `large_debt` lands at
+0.697 — the encoder has some weak signal that £740 is unusual (token
+frequency on big numbers in pretraining), but it's not reliable enough
+to gate on alone.
+
+✗ **Semantic / domain-numeric OOD is not solved.** `significant_increase`
+(0.51) and `truncate_payment_history` (0.45) are at-or-below chance.
+A £200 dd_amount_change is well-formed text; a 1-row payment_history is
+well-formed JSON. The pretrained encoder has no domain rule for either.
 
 This isn't the falsifying threshold from the original plan — that was
 "can the encoder tell an empty `contract_history` from a real one" and
 the answer there is yes, perfectly. The v0 result rules in **structural
-gating** but rules out the simplest possible **semantic gating**.
+gating** but rules out the simplest possible **domain-aware gating**
+(both synthetic-numeric and realistic-magnitude flavours).
 
 ### Next move (v1 candidates)
 

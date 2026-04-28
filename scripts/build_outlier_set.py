@@ -101,6 +101,35 @@ def _truncate_payment_history(inp: dict[str, Any], rng: random.Random) -> dict[s
     return inp
 
 
+def _large_debt(inp: dict[str, Any], rng: random.Random) -> dict[str, Any]:
+    """Mutation 7: very large DD amount (~£500-£1700 from a typical £130 base).
+    The synthetic distribution has p99=£211 / max=£219, so this is well outside
+    what Gemma saw at train time. Production routinely sees these — high-usage
+    customers, commercial accounts, accumulated arrears — and the model tends
+    to fabricate plausible-looking explanations for unfamiliar magnitudes.
+    Domain-realistic OOD, unlike `negative_numerics`."""
+    multiplier = rng.uniform(4.0, 8.0)
+    ldd = inp["latest_dd_change"]
+    for k in ("dd_amount", "recommended_dd_amount", "yearly_predicted_energy_cost_gbp"):
+        if isinstance(ldd.get(k), (int, float)):
+            ldd[k] = round(ldd[k] * multiplier, 2)
+    return inp
+
+
+def _significant_increase(inp: dict[str, Any], rng: random.Random) -> dict[str, Any]:
+    """Mutation 8: dd_amount_change £150-£300 (synthetic max is £40). Big
+    monthly jumps are real production signal — tariff resets, regulatory
+    price-cap moves, customer-induced rebanding — but never in the train
+    set. LLM tends to invent a cause that doesn't match the actual context."""
+    increase = round(rng.uniform(150, 300), 2)
+    ldd = inp["latest_dd_change"]
+    if isinstance(ldd.get("dd_amount_change"), (int, float)):
+        ldd["dd_amount_change"] = increase
+    if isinstance(ldd.get("dd_amount"), (int, float)):
+        ldd["dd_amount"] = round(ldd["dd_amount"] + increase, 2)
+    return inp
+
+
 MUTATIONS: dict[str, Callable[[dict[str, Any], random.Random], dict[str, Any]]] = {
     "drop_contract_history": _drop_contract_history,
     "gibberish_tariff_names": _gibberish_tariff_names,
@@ -108,6 +137,8 @@ MUTATIONS: dict[str, Callable[[dict[str, Any], random.Random], dict[str, Any]]] 
     "empty_dd_change_history": _empty_dd_change_history,
     "broken_dates": _broken_dates,
     "truncate_payment_history": _truncate_payment_history,
+    "large_debt": _large_debt,
+    "significant_increase": _significant_increase,
 }
 
 
