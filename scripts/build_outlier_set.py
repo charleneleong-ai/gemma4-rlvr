@@ -156,6 +156,46 @@ def _load_dataset(dataset: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _tail_flag(input_json: dict[str, Any], dd_p90: float, change_p90: float) -> str | None:
+    """Return a tail-flag label for in-distribution rows that sit in the
+    natural distribution tail (top 10%) on either dd_amount or dd_amount_change.
+
+    Used by the encoder eval to measure false-positive rate on legitimate
+    tail customers — we don't want the gate to confuse "high-usage but real"
+    with the synthetic `large_debt` / `significant_increase` mutations.
+    """
+    ldd = input_json.get("latest_dd_change", {}) or {}
+    dd = ldd.get("dd_amount")
+    change = ldd.get("dd_amount_change")
+    has_high_debt = dd is not None and dd >= dd_p90
+    has_high_increase = change is not None and abs(change) >= change_p90
+    if has_high_debt and has_high_increase:
+        return "both"
+    if has_high_debt:
+        return "high_debt"
+    if has_high_increase:
+        return "high_increase"
+    return None
+
+
+def _compute_p90s(rows: list[dict[str, Any]]) -> tuple[float, float]:
+    """p90 of |dd_amount| and |dd_amount_change| across the source dataset —
+    the threshold above which a row counts as 'natural tail'. Computed once
+    on the full dataset, not the sampled outlier set, so the threshold is
+    stable across reruns."""
+    dds = []
+    changes = []
+    for r in rows:
+        ldd = r["input_json"].get("latest_dd_change", {}) or {}
+        if ldd.get("dd_amount") is not None:
+            dds.append(abs(float(ldd["dd_amount"])))
+        if ldd.get("dd_amount_change") is not None:
+            changes.append(abs(float(ldd["dd_amount_change"])))
+    dds.sort()
+    changes.sort()
+    return dds[int(len(dds) * 0.9)], changes[int(len(changes) * 0.9)]
+
+
 @app.command()
 def main(
     dataset: Path = typer.Option(
@@ -177,7 +217,11 @@ def main(
 
     rng = random.Random(seed)
     rows = _load_dataset(dataset)
-    typer.echo(f"loaded {len(rows)} rows from {dataset.name}")
+    dd_p90, change_p90 = _compute_p90s(rows)
+    typer.echo(
+        f"loaded {len(rows)} rows from {dataset.name}  "
+        f"(p90: dd_amount=£{dd_p90:.0f}, |dd_amount_change|=£{change_p90:.1f})"
+    )
 
     half = n // 2
     sampled = rng.sample(rows, n)
@@ -195,6 +239,7 @@ def main(
                 "input_json": inp,
                 "is_outlier": 1,
                 "mutation": mutation,
+                "tail_flag": None,  # OOD rows: tail-flag is not meaningful
                 "source_row_index": src.get("row_index", -1),
             }
         )
@@ -205,6 +250,10 @@ def main(
                 "input_json": src["input_json"],
                 "is_outlier": 0,
                 "mutation": None,
+                # Naturally-tail in-dist rows — used by the encoder eval to
+                # check that the gate doesn't over-flag legitimate high-debt /
+                # high-change customers.
+                "tail_flag": _tail_flag(src["input_json"], dd_p90, change_p90),
                 "source_row_index": src.get("row_index", -1),
             }
         )
@@ -218,12 +267,18 @@ def main(
 
     counts = {m: 0 for m in mutation_names}
     counts["__indist__"] = 0
+    tail_counts: dict[str, int] = {"high_debt": 0, "high_increase": 0, "both": 0}
     for row in out_rows:
         counts[row["mutation"] or "__indist__"] += 1
+        if row.get("tail_flag"):
+            tail_counts[row["tail_flag"]] = tail_counts.get(row["tail_flag"], 0) + 1
 
     typer.echo(f"wrote {out}  ({len(out_rows)} rows)")
     for k, v in counts.items():
         typer.echo(f"  {k:30s} {v:4d}")
+    typer.echo("  tail-flagged in-dist rows (natural distribution top 10%):")
+    for k, v in tail_counts.items():
+        typer.echo(f"    tail.{k:24s} {v:4d}")
 
 
 if __name__ == "__main__":

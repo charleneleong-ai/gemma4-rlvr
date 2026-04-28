@@ -77,6 +77,57 @@ def _serialize(row: dict[str, Any]) -> str:
     return json.dumps(row["input_json"]["account_context"], sort_keys=True)
 
 
+# Domain features that bypass the encoder's blind spot for sign / magnitude /
+# array-length OOD. Computed from raw input_json — no language model needed,
+# just JSON traversal. Concatenated to the encoder embedding before the head.
+NUMERIC_FEATURE_NAMES = (
+    "dd_amount",
+    "dd_amount_change",
+    "recommended_dd_amount",
+    "dd_to_recommended_ratio",
+    "n_payment_records",
+    "n_contracts",
+    "n_dd_changes",
+)
+
+
+def _extract_numeric_features(input_json: dict[str, Any]) -> list[float]:
+    """Extract domain features in the order of NUMERIC_FEATURE_NAMES.
+
+    These cover the mutations bge can't see:
+      - dd_amount sign + magnitude (negative_numerics, large_debt)
+      - dd_amount_change magnitude (significant_increase)
+      - n_payment_records (truncate_payment_history)
+      - n_contracts, n_dd_changes (drop_*, empty_*)
+
+    Z-scoring happens at the call site once train statistics are known.
+    """
+    ldd = input_json.get("latest_dd_change", {}) or {}
+    ac = input_json.get("account_context", {}) or {}
+    dd = float(ldd.get("dd_amount") or 0.0)
+    rec = float(ldd.get("recommended_dd_amount") or 0.0)
+    return [
+        dd,
+        float(ldd.get("dd_amount_change") or 0.0),
+        rec,
+        dd / rec if rec else 0.0,
+        float(len(ac.get("payment_history") or [])),
+        float(len(ac.get("contract_history") or [])),
+        float(len(ac.get("dd_change_history") or [])),
+    ]
+
+
+def _zscore_fit(features: torch.Tensor, indist_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute mean/std on the *in-distribution* train rows only — so OOD
+    rows with extreme values don't contaminate the normalisation. Returns
+    (mean, std) tensors with std clipped at 1e-6 to avoid div-by-zero on
+    constant features."""
+    indist = features[indist_mask]
+    mean = indist.mean(dim=0)
+    std = indist.std(dim=0).clamp(min=1e-6)
+    return mean, std
+
+
 @torch.no_grad()
 def _embed(
     texts: list[str],
@@ -120,6 +171,12 @@ def _auroc(scores: list[float], labels: list[int]) -> float:
 def main(
     data: Path = typer.Option(DEFAULT_DATA, help="Outlier set JSONL"),
     model_name: str = typer.Option(DEFAULT_MODEL, help="HF encoder repo id"),
+    features: str = typer.Option(
+        "text",
+        help="Input features: 'text' (bge embedding only) or 'text+numeric' "
+        "(bge embedding concatenated with z-scored manual numeric features). "
+        "v0 = text; v1 = text+numeric.",
+    ),
     epochs: int = typer.Option(100, help="Linear-head training epochs"),
     lr: float = typer.Option(1e-2, help="AdamW learning rate"),
     weight_decay: float = typer.Option(1e-4, help="AdamW weight decay"),
@@ -130,6 +187,8 @@ def main(
     ),
 ) -> None:
     """Train + evaluate a linear OOD head on frozen bge embeddings."""
+    if features not in ("text", "text+numeric"):
+        raise typer.BadParameter(f"--features must be 'text' or 'text+numeric'. Got {features!r}.")
     if not data.exists():
         raise typer.BadParameter(
             f"{data} not found — run scripts/build_outlier_set.py first."
@@ -137,7 +196,7 @@ def main(
 
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    typer.echo(f"device: {device}")
+    typer.echo(f"device: {device}  features: {features}")
 
     typer.echo(f"loading {model_name}…")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -160,7 +219,34 @@ def main(
     train_emb = _embed(train_texts, tokenizer, encoder, device)
     heldout_emb = _embed(heldout_texts, tokenizer, encoder, device)
 
-    head = nn.Linear(embed_dim, 1).to(device)
+    feature_mean: torch.Tensor | None = None
+    feature_std: torch.Tensor | None = None
+    if features == "text+numeric":
+        train_num = torch.tensor(
+            [_extract_numeric_features(r["input_json"]) for r in train_rows],
+            dtype=torch.float32,
+            device=device,
+        )
+        heldout_num = torch.tensor(
+            [_extract_numeric_features(r["input_json"]) for r in heldout_rows],
+            dtype=torch.float32,
+            device=device,
+        )
+        # z-score on in-distribution train rows so OOD extremes don't poison
+        # the normalisation statistics
+        indist_mask = train_labels == 0
+        feature_mean, feature_std = _zscore_fit(train_num, indist_mask)
+        train_num = (train_num - feature_mean) / feature_std
+        heldout_num = (heldout_num - feature_mean) / feature_std
+        train_emb = torch.cat([train_emb, train_num], dim=-1)
+        heldout_emb = torch.cat([heldout_emb, heldout_num], dim=-1)
+        typer.echo(
+            f"concat'd numeric features: +{train_num.shape[-1]} dims "
+            f"({', '.join(NUMERIC_FEATURE_NAMES)})"
+        )
+
+    head_in_dim = train_emb.shape[-1]
+    head = nn.Linear(head_in_dim, 1).to(device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.BCEWithLogitsLoss()
 
@@ -206,18 +292,38 @@ def main(
     for mut in sorted(by_mutation.keys()):
         typer.echo(f"  {mut:30s}   {by_mutation[mut]:.3f}")
 
+    # Tail-flag false-positive rate on in-dist rows: how often does the gate
+    # flag a legitimate-but-extreme customer (high_debt / high_increase)? Same
+    # threshold as overall AUROC analysis would use; this is the operational
+    # "are we routing real customers to the fallback?" question.
+    threshold = 0.0  # logit > 0 → P(OOD) > 0.5
+    indist_rows = [r for r in heldout_rows if r["is_outlier"] == 0]
+    indist_scores_ordered = [s for r, s in zip(heldout_rows, heldout_scores) if r["is_outlier"] == 0]
+    typer.echo("\n=== in-dist tail false-positive rate (logit > 0 means flagged) ===")
+    for tag in ("high_debt", "high_increase", "both", None):
+        sliced = [s for r, s in zip(indist_rows, indist_scores_ordered) if r.get("tail_flag") == tag]
+        if not sliced:
+            continue
+        flagged = sum(1 for s in sliced if s > threshold)
+        label = f"tail.{tag}" if tag else "tail.none"
+        typer.echo(f"  {label:30s}   {flagged}/{len(sliced)}  ({flagged/len(sliced):.0%})")
+
     if save_head is not None:
         save_head.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "weight": head.weight.detach().cpu(),
-                "bias": head.bias.detach().cpu(),
-                "encoder": model_name,
-                "embed_dim": embed_dim,
-                "heldout_auroc": overall,
-            },
-            save_head,
-        )
+        ckpt: dict[str, Any] = {
+            "weight": head.weight.detach().cpu(),
+            "bias": head.bias.detach().cpu(),
+            "encoder": model_name,
+            "features": features,
+            "embed_dim": embed_dim,
+            "head_in_dim": head_in_dim,
+            "heldout_auroc": overall,
+        }
+        if features == "text+numeric":
+            ckpt["numeric_feature_names"] = list(NUMERIC_FEATURE_NAMES)
+            ckpt["numeric_mean"] = feature_mean.detach().cpu()
+            ckpt["numeric_std"] = feature_std.detach().cpu()
+        torch.save(ckpt, save_head)
         typer.echo(f"\nsaved head to {save_head}")
 
 

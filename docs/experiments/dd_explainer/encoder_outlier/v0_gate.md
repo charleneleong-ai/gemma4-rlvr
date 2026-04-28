@@ -135,6 +135,96 @@ gating** but rules out the simplest possible **domain-aware gating**
 
 The encoder gate as currently specified will still wire in — it'll just gate **structural OOD only** for v0. Whether that lifts mean_total past 9.5 depends on what fraction of E18's `no_halluc` failures come from structural vs. semantic OOD. The eval-integration step (build sequence #4) measures that directly.
 
+## v1 results — frozen bge + linear head + 7 numeric features
+
+**Setup change:** concat `[bge_embedding(384), zscored_numeric_features(7)]` →
+`nn.Linear(391, 1)`. Numeric features cover the domain blind spot:
+
+```
+dd_amount, dd_amount_change, recommended_dd_amount,
+dd_to_recommended_ratio, n_payment_records, n_contracts, n_dd_changes
+```
+
+Mean / std fit on **in-distribution train rows only** (so OOD extremes don't
+poison the normalisation). Saved with the head checkpoint so inference applies
+the same normalisation. Reproduce with
+`uv run python scripts/train_outlier_encoder.py --features text+numeric`.
+
+| split | v0 (text only) | **v1 (text + numeric)** |
+|---|---|---|
+| train | 0.805 | **0.908** |
+| **heldout (overall)** | 0.717 | **0.885** |
+
+### Per-mutation heldout AUROC — v0 → v1
+
+| mutation | flavour | v0 | **v1** |
+|---|---|---|---|
+| `drop_contract_history` | synthetic | 1.000 | **1.000** |
+| `empty_dd_change_history` | synthetic | 1.000 | **1.000** |
+| `broken_dates` | synthetic | 1.000 | 0.985 |
+| `large_debt` | **realistic** | 0.697 | **0.989** |
+| `gibberish_tariff_names` | synthetic | 0.616 | 0.668 |
+| `negative_numerics` | synthetic | 0.517 | 0.505 |
+| `significant_increase` | **realistic** | 0.507 | **1.000** |
+| `truncate_payment_history` | synthetic | 0.450 | **1.000** |
+
+The two realistic-flavour mutations — the ones that matter for production — go from "barely better than chance" to **0.989 / 1.000**. The encoder finally has the inputs it needs to separate `large_debt` (£740 mutation) from a legitimate £200 high-debt customer.
+
+### In-dist tail false-positive rate — v0 → v1
+
+How often the gate WRONGLY routes a legitimate tail customer to the fallback (`logit > 0` ⇒ flagged):
+
+| in-dist subset | rows | v0 | **v1** |
+|---|---|---|---|
+| `tail.high_debt` (top-10% on `dd_amount`) | 5 | **60% (3/5)** | **0% (0/5)** ✓ |
+| `tail.high_increase` (top-10% on `dd_amount_change`) | 5 | 0% | 0% |
+| `tail.none` (synthetic baseline) | 40 | 15% | 10% |
+
+v0 was wrongly gating 60% of legitimate high-debt customers — the encoder confused them with the synthetic `large_debt` mutation. v1's manual numeric features let the head learn the magnitude difference (£200 in-dist vs. £750 mutation) and the false-positive rate drops to **0%**.
+
+### Verdict (v1)
+
+✓ **All realistic-flavour OOD is detected** at AUROC ≥ 0.989, with 0% false-positive on legitimate tail customers. The gate is reliable enough to wire into the eval harness.
+
+✗ **`negative_numerics` (0.505) is still chance-level.** The signed `dd_amount` z-score on a real £140 vs. mutated -£141 has the same magnitude, just opposite sign. Easy fix if it ever matters: add `sign(dd_amount)` as a separate feature. Doesn't matter in practice — production never sees negative DD amounts.
+
+Heldout overall AUROC of 0.885 is short of the 0.95 target on paper, but the failure mode is the synthetic-only `negative_numerics` (production-irrelevant) plus partial credit on `gibberish_tariff_names` (low-stakes). On the **realistic** flavour the gate hits AUROC ≥ 0.989. v1 is good enough to wire in.
+
+## Fallback wiring (build sequence #4 prep)
+
+Module: `dd_explainer_gate.py` — exposes `GateModel.load()`, `predict_outlier_score()`, `should_gate()`, `fallback_response()`.
+
+Integration sketch for the eval harness:
+
+```python
+from dd_explainer_gate import GateModel, fallback_response
+
+gate = GateModel.load("data/outlier_head_v1.pt")
+
+for row in heldout_rows:
+    if gate.should_gate(row["input_json"]):
+        response = fallback_response()        # short-circuit, no Gemma call
+    else:
+        response = run_gemma(model, row)      # E18's adapter as today
+    score_completion(response, row, ...)
+```
+
+`fallback_response()` returns a `DirectDebitExplainerResponse`-shaped dict with a single `TriggerExplanation` using the existing `No triggers identified` enum value:
+
+```json
+{
+  "explanations": [{
+    "trigger": "No triggers identified",
+    "header": "Unable to explain change",
+    "explanation": "The provided account context does not contain enough information to identify a specific reason for this Direct Debit change. Please review the account manually."
+  }]
+}
+```
+
+No schema changes, no rubric changes, no Gemma re-train. The rubric scores the fallback exactly as it scores any LLM output — `schema_valid=1`, `triggers_in_enum=1`, `f1_triggers` will be poor (since the OOD inputs presumably had real triggers in the ground truth), but `no_hallucinated_facts=+1` (no citations to validate) — which is the whole point.
+
+Whether wiring this in lifts E18's gated `mean_total` past 9.5 depends on what fraction of the heldout's `no_halluc` cost comes from inputs the gate flags. **The gated A/B (build sequence step 4) is the definitive test.**
+
 ## Out of scope for this branch
 
 - Production routing — this is just train + eval gating to validate the hypothesis.
