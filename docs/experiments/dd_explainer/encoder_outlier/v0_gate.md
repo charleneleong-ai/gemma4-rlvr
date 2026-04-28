@@ -1,8 +1,9 @@
-# Encoder-outlier gate — plan & scope
+# `v0_gate` — encoder-outlier OOD gate, plan & scope
 
 **Status:** scoping (no code yet)
 **Branch:** `feat/encoder-outlier-gate`
-**Driving doc:** [`docs/ceiling-diagnosis-2026-04-27.md`](ceiling-diagnosis-2026-04-27.md#next-move--encoder-outlier-suppression)
+**Task:** `dd_explainer` · **Config slot:** `encoder_outlier` (no Gemma training run — this is a frozen-encoder + linear-head pipeline)
+**Driving doc:** [`docs/ceiling-diagnosis-2026-04-27.md`](../../../ceiling-diagnosis-2026-04-27.md#next-move--encoder-outlier-suppression)
 
 ## Why this branch exists
 
@@ -82,6 +83,6 @@ If AUROC ≥ 0.95 but mean_total only nudges to 9.35-9.4, the failure is not dat
 2. **Outlier mutator** (`scripts/build_outlier_set.py`) — emit `data/outlier_set_v0.jsonl` with 200 rows (100 OOD + 100 in-dist), labelled, with the mutation type recorded for diagnosis.
 3. **Encoder training** (`scripts/train_outlier_encoder.py`) — three candidates × AUROC report.
 4. **Eval integration** (`dd_explainer_eval.py`) — gated A/B against E18.
-5. **Writeup** (`docs/experiments/dd_explainer/encoder_outlier/v0_gate.md` — same `dd_explainer` task as the GRPO sweeps, but `encoder_outlier` in the config slot since this isn't a `train_v2_80gb` Gemma run) once results land.
+5. **Writeup** — backfill the Results / Verdict / Next move sections of *this* doc once results land.
 
-The first three steps should land as separate small PRs against this branch so each can be reviewed independently.
+The first three steps should land as separate small PRs against this branch so each can be reviewed independently. Cross-sweep synthesis (multi-knob equilibria, branch champions, etc.) belongs in [`docs/ceiling-diagnosis-2026-04-27.md`](../../../ceiling-diagnosis-2026-04-27.md), not here.

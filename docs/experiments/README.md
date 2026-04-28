@@ -47,3 +47,7 @@ diagnosis doc, not in any single sweep writeup.
 - [`v2_data_regen.md`](dd_explainer/train_v2_80gb/v2_data_regen.md) — first test of the regenerated multi-trigger dataset (E15-E16). f1 ceiling broken at 7.523.
 - [`v2_no_halluc_weighted.md`](dd_explainer/train_v2_80gb/v2_no_halluc_weighted.md) — bracket the f1 ↔ no_halluc trade ridge with reward weights ×{2,3} (E17-E20). E18 = branch champ at 7.745.
 - [`v2_granular_no_halluc.md`](dd_explainer/train_v2_80gb/v2_granular_no_halluc.md) — replace binary +1/-3 with per-fact granular reward (E21-E22). Plateau confirmed; reward-side exhausted.
+
+### `dd_explainer` / `encoder_outlier` (no Gemma training — frozen-encoder OOD gate)
+
+- [`v0_gate.md`](dd_explainer/encoder_outlier/v0_gate.md) — pre-flight encoder gate that routes OOD account contexts to "insufficient context" before Gemma generates. Scoping doc (no results yet); branch `feat/encoder-outlier-gate`.
