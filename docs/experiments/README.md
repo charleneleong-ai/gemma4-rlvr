@@ -9,13 +9,14 @@ and what the next sweep should test. The cross-sweep narrative lives in
 
 ```
 docs/experiments/
-└── <config_name>/
-    └── <schedule_name>.md   # one writeup per sweep yaml in configs/schedules/
+└── <task>/
+    └── <config_name>/
+        └── <schedule_name>.md   # one writeup per sweep yaml in configs/schedules/
 ```
 
-`<config_name>` mirrors `experiments/<task>/<config_name>/results.jsonl` and
-`<schedule_name>` mirrors `configs/schedules/<schedule_name>.yaml` so you can
-trace from any artefact (results row, schedule yaml, doc) to the other two.
+Mirrors `experiments/<task>/<config_name>/results.jsonl` 1:1 — `<task>`,
+`<config_name>`, and `<schedule_name>` are the three keys you can trace from
+any artefact (results row, schedule yaml, runtime chart, doc) to the others.
 
 ## What goes in a sweep writeup
 
@@ -41,8 +42,8 @@ diagnosis doc, not in any single sweep writeup.
 
 ## Index
 
-### `train_v2_80gb` (Gemma 4 + new dataset on 80GB A100 PCIe)
+### `dd_explainer` / `train_v2_80gb` (Gemma 4 + new dataset on 80GB A100 PCIe)
 
-- [`v2_data_regen.md`](train_v2_80gb/v2_data_regen.md) — first test of the regenerated multi-trigger dataset (E15-E16). f1 ceiling broken at 7.523.
-- [`v2_no_halluc_weighted.md`](train_v2_80gb/v2_no_halluc_weighted.md) — bracket the f1 ↔ no_halluc trade ridge with reward weights ×{2,3} (E17-E20). E18 = branch champ at 7.745.
-- [`v2_granular_no_halluc.md`](train_v2_80gb/v2_granular_no_halluc.md) — replace binary +1/-3 with per-fact granular reward (E21-E22). Plateau confirmed; reward-side exhausted.
+- [`v2_data_regen.md`](dd_explainer/train_v2_80gb/v2_data_regen.md) — first test of the regenerated multi-trigger dataset (E15-E16). f1 ceiling broken at 7.523.
+- [`v2_no_halluc_weighted.md`](dd_explainer/train_v2_80gb/v2_no_halluc_weighted.md) — bracket the f1 ↔ no_halluc trade ridge with reward weights ×{2,3} (E17-E20). E18 = branch champ at 7.745.
+- [`v2_granular_no_halluc.md`](dd_explainer/train_v2_80gb/v2_granular_no_halluc.md) — replace binary +1/-3 with per-fact granular reward (E21-E22). Plateau confirmed; reward-side exhausted.

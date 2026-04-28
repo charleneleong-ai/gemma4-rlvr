@@ -1,6 +1,6 @@
 # `v2_no_halluc_weighted` — does ×2/×3 reward weighting lift no_halluc?
 
-**Schedule:** [`configs/schedules/v2_no_halluc_weighted.yaml`](../../../configs/schedules/v2_no_halluc_weighted.yaml)
+**Schedule:** [`configs/schedules/v2_no_halluc_weighted.yaml`](../../../../configs/schedules/v2_no_halluc_weighted.yaml)
 **Config:** `train_v2_80gb`
 **Chassis:** `unsloth/gemma-4-E4B-it` · LoRA r=128 · max_seq=8192 · num_generations=16
 **Hardware:** A100 PCIe 80GB
@@ -45,7 +45,7 @@ iters:
 ```
 
 The CLI plumbing for `--no-halluc-weight` is a thin factory in
-[`dd_explainer_rewards.make_weighted_no_halluc`](../../../dd_explainer_rewards.py)
+[`dd_explainer_rewards.make_weighted_no_halluc`](../../../../dd_explainer_rewards.py)
 that multiplies every `reward_no_hallucinated_facts` score by the weight; the
 function name is preserved for W&B logging.
 
