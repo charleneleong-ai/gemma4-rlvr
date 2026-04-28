@@ -88,6 +88,8 @@ NUMERIC_FEATURE_NAMES = (
     "n_payment_records",
     "n_contracts",
     "n_dd_changes",
+    "n_missed_payments",
+    "frac_missed_payments",
 )
 
 
@@ -99,6 +101,7 @@ def _extract_numeric_features(input_json: dict[str, Any]) -> list[float]:
       - dd_amount_change magnitude (significant_increase)
       - n_payment_records (truncate_payment_history)
       - n_contracts, n_dd_changes (drop_*, empty_*)
+      - n_missed_payments + frac_missed_payments (many_missed_payments)
 
     Z-scoring happens at the call site once train statistics are known.
     """
@@ -106,14 +109,18 @@ def _extract_numeric_features(input_json: dict[str, Any]) -> list[float]:
     ac = input_json.get("account_context", {}) or {}
     dd = float(ldd.get("dd_amount") or 0.0)
     rec = float(ldd.get("recommended_dd_amount") or 0.0)
+    ph = ac.get("payment_history") or []
+    n_missed = sum(1 for p in ph if p.get("is_payment_successful") is False)
     return [
         dd,
         float(ldd.get("dd_amount_change") or 0.0),
         rec,
         dd / rec if rec else 0.0,
-        float(len(ac.get("payment_history") or [])),
+        float(len(ph)),
         float(len(ac.get("contract_history") or [])),
         float(len(ac.get("dd_change_history") or [])),
+        float(n_missed),
+        n_missed / len(ph) if ph else 0.0,
     ]
 
 
@@ -292,21 +299,25 @@ def main(
     for mut in sorted(by_mutation.keys()):
         typer.echo(f"  {mut:30s}   {by_mutation[mut]:.3f}")
 
-    # Tail-flag false-positive rate on in-dist rows: how often does the gate
-    # flag a legitimate-but-extreme customer (high_debt / high_increase)? Same
-    # threshold as overall AUROC analysis would use; this is the operational
-    # "are we routing real customers to the fallback?" question.
+    # Tail-tag false-positive rate on in-dist rows: how often does the gate
+    # flag a legitimate-but-extreme customer (high_debt / high_increase /
+    # many_missed)? Tags are independent — a row can carry multiple, so we
+    # report per-tag rate plus the "no tag" baseline.
     threshold = 0.0  # logit > 0 → P(OOD) > 0.5
     indist_rows = [r for r in heldout_rows if r["is_outlier"] == 0]
     indist_scores_ordered = [s for r, s in zip(heldout_rows, heldout_scores) if r["is_outlier"] == 0]
     typer.echo("\n=== in-dist tail false-positive rate (logit > 0 means flagged) ===")
-    for tag in ("high_debt", "high_increase", "both", None):
-        sliced = [s for r, s in zip(indist_rows, indist_scores_ordered) if r.get("tail_flag") == tag]
+    all_tags = ("high_debt", "high_change", "many_missed", "in_credit")
+    for tag in all_tags:
+        sliced = [s for r, s in zip(indist_rows, indist_scores_ordered) if tag in (r.get("tail_flags") or [])]
         if not sliced:
             continue
         flagged = sum(1 for s in sliced if s > threshold)
-        label = f"tail.{tag}" if tag else "tail.none"
-        typer.echo(f"  {label:30s}   {flagged}/{len(sliced)}  ({flagged/len(sliced):.0%})")
+        typer.echo(f"  tail.{tag:25s}   {flagged}/{len(sliced)}  ({flagged/len(sliced):.0%})")
+    untagged = [s for r, s in zip(indist_rows, indist_scores_ordered) if not (r.get("tail_flags") or [])]
+    if untagged:
+        flagged = sum(1 for s in untagged if s > threshold)
+        typer.echo(f"  tail.none{'':22s}   {flagged}/{len(untagged)}  ({flagged/len(untagged):.0%})")
 
     if save_head is not None:
         save_head.parent.mkdir(parents=True, exist_ok=True)

@@ -130,6 +130,52 @@ def _significant_increase(inp: dict[str, Any], rng: random.Random) -> dict[str, 
     return inp
 
 
+def _many_missed_payments(inp: dict[str, Any], rng: random.Random) -> dict[str, Any]:
+    """Mutation 9: chronic-misser — flip 6-10 of payment_history to
+    is_payment_successful=False. Synthetic distribution has max 3 missed
+    out of ~12. Production sees chronic financial-difficulty customers
+    with way more — the LLM tends to hallucinate explanations (e.g.
+    inventing arrears amounts) for unfamiliar miss densities."""
+    ph = inp.get("account_context", {}).get("payment_history") or []
+    if not ph:
+        return inp
+    n_to_miss = min(rng.randint(6, 10), len(ph))
+    indices = rng.sample(range(len(ph)), n_to_miss)
+    for idx in indices:
+        ph[idx]["is_payment_successful"] = False
+    return inp
+
+
+def _significant_decrease(inp: dict[str, Any], rng: random.Random) -> dict[str, Any]:
+    """Mutation 10: dd_amount_change -£150 to -£300 (synthetic min is -£40).
+    Mirror of significant_increase — large drops do happen in production
+    (energy-efficiency upgrades, summer seasonal recalibration, leaving a
+    fixed-rate tariff onto cheaper SVR) but are well outside the synthetic
+    range. LLM has never seen jumps this big DOWNWARD and hallucinates."""
+    decrease = round(rng.uniform(-300, -150), 2)
+    ldd = inp["latest_dd_change"]
+    if isinstance(ldd.get("dd_amount_change"), (int, float)):
+        ldd["dd_amount_change"] = decrease
+    if isinstance(ldd.get("dd_amount"), (int, float)):
+        # Reflect the drop in the new dd_amount; clamp to a minimum of £5 so
+        # we don't overlap with `negative_numerics`.
+        ldd["dd_amount"] = round(max(5.0, ldd["dd_amount"] + decrease), 2)
+    return inp
+
+
+def _customer_in_credit(inp: dict[str, Any], rng: random.Random) -> dict[str, Any]:
+    """Mutation 11: customer in credit — paying 3-10× the recommended DD.
+    Synthetic distribution has dd_amount/recommended ratio ∈ [0.96, 1.05]
+    (DDs are well-calibrated to recommendations). Production sees
+    accumulated credit from chronic overpayment after meter-read corrections,
+    seasonal usage drops, etc. LLM tends to invent reasons for the gap."""
+    ratio = rng.uniform(3.0, 10.0)
+    ldd = inp["latest_dd_change"]
+    if isinstance(ldd.get("dd_amount"), (int, float)):
+        ldd["recommended_dd_amount"] = round(ldd["dd_amount"] / ratio, 2)
+    return inp
+
+
 MUTATIONS: dict[str, Callable[[dict[str, Any], random.Random], dict[str, Any]]] = {
     "drop_contract_history": _drop_contract_history,
     "gibberish_tariff_names": _gibberish_tariff_names,
@@ -139,6 +185,9 @@ MUTATIONS: dict[str, Callable[[dict[str, Any], random.Random], dict[str, Any]]] 
     "truncate_payment_history": _truncate_payment_history,
     "large_debt": _large_debt,
     "significant_increase": _significant_increase,
+    "many_missed_payments": _many_missed_payments,
+    "significant_decrease": _significant_decrease,
+    "customer_in_credit": _customer_in_credit,
 }
 
 
@@ -156,44 +205,76 @@ def _load_dataset(dataset: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _tail_flag(input_json: dict[str, Any], dd_p90: float, change_p90: float) -> str | None:
-    """Return a tail-flag label for in-distribution rows that sit in the
-    natural distribution tail (top 10%) on either dd_amount or dd_amount_change.
+def _tail_flags(
+    input_json: dict[str, Any],
+    dd_p90: float,
+    change_p90: float,
+    missed_threshold: int,
+    ratio_p95: float,
+) -> list[str]:
+    """Return zero or more tail-flag tags for in-distribution rows that sit
+    in the natural distribution tail. Tags are independent — a row can be
+    `high_debt` AND `many_missed` if the customer is genuinely a chronic
+    high-usage misser.
+
+    Tags:
+      - `high_debt`     — dd_amount in top 10% of natural distribution
+      - `high_change`   — |dd_amount_change| in top 10% (covers both increase + decrease)
+      - `many_missed`   — n_missed at the natural maximum (synthetic max=3)
+      - `in_credit`     — dd_amount/recommended_dd_amount in top 5% (slightly overpaying)
 
     Used by the encoder eval to measure false-positive rate on legitimate
-    tail customers — we don't want the gate to confuse "high-usage but real"
-    with the synthetic `large_debt` / `significant_increase` mutations.
+    tail customers — we don't want the gate to confuse natural extremes with
+    the synthetic mutations of the same shape.
     """
     ldd = input_json.get("latest_dd_change", {}) or {}
+    ph = input_json.get("account_context", {}).get("payment_history") or []
     dd = ldd.get("dd_amount")
+    rec = ldd.get("recommended_dd_amount")
     change = ldd.get("dd_amount_change")
-    has_high_debt = dd is not None and dd >= dd_p90
-    has_high_increase = change is not None and abs(change) >= change_p90
-    if has_high_debt and has_high_increase:
-        return "both"
-    if has_high_debt:
-        return "high_debt"
-    if has_high_increase:
-        return "high_increase"
-    return None
+    n_missed = sum(1 for p in ph if p.get("is_payment_successful") is False)
+
+    flags: list[str] = []
+    if dd is not None and dd >= dd_p90:
+        flags.append("high_debt")
+    if change is not None and abs(change) >= change_p90:
+        flags.append("high_change")
+    if n_missed >= missed_threshold:
+        flags.append("many_missed")
+    if dd is not None and rec and rec > 0 and (dd / rec) >= ratio_p95:
+        flags.append("in_credit")
+    return flags
 
 
-def _compute_p90s(rows: list[dict[str, Any]]) -> tuple[float, float]:
-    """p90 of |dd_amount| and |dd_amount_change| across the source dataset —
-    the threshold above which a row counts as 'natural tail'. Computed once
-    on the full dataset, not the sampled outlier set, so the threshold is
-    stable across reruns."""
-    dds = []
-    changes = []
+def _compute_thresholds(rows: list[dict[str, Any]]) -> tuple[float, float, int, float]:
+    """Returns (dd_amount_p90, |dd_amount_change|_p90, max natural n_missed,
+    dd/recommended ratio p95) — thresholds above which a row counts as
+    'natural tail'. Computed on the full dataset so thresholds are stable
+    across reruns."""
+    dds: list[float] = []
+    changes: list[float] = []
+    miss_counts: list[int] = []
+    ratios: list[float] = []
     for r in rows:
-        ldd = r["input_json"].get("latest_dd_change", {}) or {}
+        inp = r.get("input_json", {})
+        ldd = inp.get("latest_dd_change", {}) or {}
+        ph = inp.get("account_context", {}).get("payment_history") or []
         if ldd.get("dd_amount") is not None:
             dds.append(abs(float(ldd["dd_amount"])))
         if ldd.get("dd_amount_change") is not None:
             changes.append(abs(float(ldd["dd_amount_change"])))
+        if ldd.get("dd_amount") and ldd.get("recommended_dd_amount"):
+            ratios.append(float(ldd["dd_amount"]) / float(ldd["recommended_dd_amount"]))
+        miss_counts.append(sum(1 for p in ph if p.get("is_payment_successful") is False))
     dds.sort()
     changes.sort()
-    return dds[int(len(dds) * 0.9)], changes[int(len(changes) * 0.9)]
+    ratios.sort()
+    return (
+        dds[int(len(dds) * 0.9)],
+        changes[int(len(changes) * 0.9)],
+        max(miss_counts) if miss_counts else 0,
+        ratios[int(len(ratios) * 0.95)] if ratios else 1.0,
+    )
 
 
 @app.command()
@@ -217,10 +298,11 @@ def main(
 
     rng = random.Random(seed)
     rows = _load_dataset(dataset)
-    dd_p90, change_p90 = _compute_p90s(rows)
+    dd_p90, change_p90, missed_max, ratio_p95 = _compute_thresholds(rows)
     typer.echo(
         f"loaded {len(rows)} rows from {dataset.name}  "
-        f"(p90: dd_amount=£{dd_p90:.0f}, |dd_amount_change|=£{change_p90:.1f})"
+        f"(p90 dd_amount=£{dd_p90:.0f}, p90 |dd_amount_change|=£{change_p90:.1f}, "
+        f"max n_missed={missed_max}, p95 dd/rec ratio={ratio_p95:.2f})"
     )
 
     half = n // 2
@@ -239,7 +321,7 @@ def main(
                 "input_json": inp,
                 "is_outlier": 1,
                 "mutation": mutation,
-                "tail_flag": None,  # OOD rows: tail-flag is not meaningful
+                "tail_flags": [],  # OOD rows: tail-flag is not meaningful
                 "source_row_index": src.get("row_index", -1),
             }
         )
@@ -252,8 +334,10 @@ def main(
                 "mutation": None,
                 # Naturally-tail in-dist rows — used by the encoder eval to
                 # check that the gate doesn't over-flag legitimate high-debt /
-                # high-change customers.
-                "tail_flag": _tail_flag(src["input_json"], dd_p90, change_p90),
+                # high-change / chronic-misser customers.
+                "tail_flags": _tail_flags(
+                    src["input_json"], dd_p90, change_p90, missed_max, ratio_p95
+                ),
                 "source_row_index": src.get("row_index", -1),
             }
         )
@@ -267,16 +351,21 @@ def main(
 
     counts = {m: 0 for m in mutation_names}
     counts["__indist__"] = 0
-    tail_counts: dict[str, int] = {"high_debt": 0, "high_increase": 0, "both": 0}
+    tail_counts: dict[str, int] = {
+        "high_debt": 0,
+        "high_change": 0,
+        "many_missed": 0,
+        "in_credit": 0,
+    }
     for row in out_rows:
         counts[row["mutation"] or "__indist__"] += 1
-        if row.get("tail_flag"):
-            tail_counts[row["tail_flag"]] = tail_counts.get(row["tail_flag"], 0) + 1
+        for tag in row.get("tail_flags") or []:
+            tail_counts[tag] = tail_counts.get(tag, 0) + 1
 
     typer.echo(f"wrote {out}  ({len(out_rows)} rows)")
     for k, v in counts.items():
         typer.echo(f"  {k:30s} {v:4d}")
-    typer.echo("  tail-flagged in-dist rows (natural distribution top 10%):")
+    typer.echo("  tail-flagged in-dist rows (natural distribution tail; rows can carry multiple tags):")
     for k, v in tail_counts.items():
         typer.echo(f"    tail.{k:24s} {v:4d}")
 
