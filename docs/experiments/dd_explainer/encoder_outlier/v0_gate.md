@@ -71,6 +71,57 @@ If gated mean_total > 9.5, we have the lift.
 
 If AUROC ≥ 0.95 but mean_total only nudges to 9.35-9.4, the failure is not data drift — most of the no_halluc cost comes from in-distribution inputs the LLM hallucinates against. Pivot to base-model swap.
 
+## v0 results — frozen bge-small-en-v1.5 + linear head
+
+**Setup:** `BAAI/bge-small-en-v1.5` (33M params, frozen), mean-pooled L2-normalised
+sentence embedding, `nn.Linear(384, 1)` head, `BCEWithLogitsLoss`, AdamW @ lr=1e-2,
+100 epochs, 100 train / 100 heldout (50/50 stratified by `is_outlier`),
+seed=42. ~30s end-to-end on the A100. Reproduce with
+`uv run python scripts/train_outlier_encoder.py`.
+
+| split | AUROC |
+|---|---|
+| train | 0.870 |
+| **heldout (overall)** | **0.786** |
+
+### Per-mutation heldout AUROC
+
+| mutation | AUROC | encoder picks up |
+|---|---|---|
+| `drop_contract_history` | **1.000** | empty array → JSON shape change |
+| `empty_dd_change_history` | **1.000** | empty array → JSON shape change |
+| `broken_dates` | 0.931 | `1970-01-01` strings stand out vs. real dates |
+| `gibberish_tariff_names` | 0.757 | `zxq42_payg` reads unlike English brand names |
+| `negative_numerics` | 0.409 | ✗ pretrained encoder has no "DD should be positive" prior |
+| `truncate_payment_history` | 0.414 | ✗ shorter array is structurally legal — no signal |
+
+### Verdict (v0)
+
+✓ **Structural OOD is solved.** Empty arrays and broken dates score AUROC ≥ 0.93
+without any feature engineering — the pretrained encoder already separates them.
+
+✗ **Semantic / domain-numeric OOD is not.** Negative DD amounts and a
+1-row payment_history are well-formed JSON; the encoder has no domain
+rule saying these are anomalous. AUROC barely above 0.4 (worse than
+chance, the linear head is *anti-correlating*).
+
+This isn't the falsifying threshold from the original plan — that was
+"can the encoder tell an empty `contract_history` from a real one" and
+the answer there is yes, perfectly. The v0 result rules in **structural
+gating** but rules out the simplest possible **semantic gating**.
+
+### Next move (v1 candidates)
+
+1. **Pre-summarise the input** — extract critical numerics (`dd_amount`, `n_payments`, `n_contracts`) into a short natural-language sentence the encoder can score. e.g.
+   `"DD amount £-141.20, recommended £-145.02, 1 payment record, 1 contract."`
+   Negative numbers are unusual *prose* even when they're not unusual JSON.
+2. **Add manual numeric features alongside the embedding** — concatenate `[embedding, sign(dd_amount), n_payments, n_contracts]` before the linear head. ~5 extra dims, but encodes the domain rules the encoder lacks.
+3. **Try `gemma-embed-300m`** — bigger encoder, more numeric awareness in pretraining. Cheap to swap (one CLI flag).
+
+(1) is the cheapest, most principled fix. (2) is the most reliable — explicit features bypass the encoder's blind spot entirely. Worth running both and comparing.
+
+The encoder gate as currently specified will still wire in — it'll just gate **structural OOD only** for v0. Whether that lifts mean_total past 9.5 depends on what fraction of E18's `no_halluc` failures come from structural vs. semantic OOD. The eval-integration step (build sequence #4) measures that directly.
+
 ## Out of scope for this branch
 
 - Production routing — this is just train + eval gating to validate the hypothesis.
