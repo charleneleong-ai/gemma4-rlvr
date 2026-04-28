@@ -83,6 +83,10 @@ wandb/
 # The sidecar .meta.json files ARE committed (small, capture provenance).
 data/dd_dataset_*.jsonl
 
+# Outlier-detection training set — regenerable via scripts/build_outlier_set.py
+# (seed-deterministic). Only the script is committed.
+data/outlier_set_*.jsonl
+
 # Production LangSmith trace exports — raw parquet is heavy and uninteresting
 # to re-ship; keep the scrubbed reports/metadata/refinements visible.
 .error_analysis_cache/**/*.parquet
