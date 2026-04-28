@@ -114,3 +114,4 @@ logs/
 # Backup files anywhere (editor saves, results.jsonl backups, etc).
 *.bak
 *.bak.*
+data/outlier_head_*.pt
