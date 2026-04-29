@@ -698,6 +698,11 @@ def train(
     num_generations: Optional[int] = typer.Option(None),
     learning_rate: Optional[float] = typer.Option(None),
     beta: Optional[float] = typer.Option(None),
+    max_grad_norm: Optional[float] = typer.Option(
+        None,
+        help="Per-step gradient-norm clip (HF default = 1.0). Drop to 0.5 for "
+             "noisy MoE-LoRA training where post-warmup grad bursts drive KL divergence.",
+    ),
     lora_rank: Optional[int] = typer.Option(None),
     load_in_4bit: Optional[bool] = typer.Option(
         None,
@@ -757,7 +762,8 @@ def train(
         "output_dir": output_dir, "max_seq_length": max_seq_length,
         "max_completion_length": max_completion_length, "batch_size": batch_size,
         "grad_accum": grad_accum, "num_generations": num_generations,
-        "learning_rate": learning_rate, "beta": beta, "lora_rank": lora_rank,
+        "learning_rate": learning_rate, "beta": beta, "max_grad_norm": max_grad_norm,
+        "lora_rank": lora_rank,
         "load_in_4bit": load_in_4bit,
         "use_gradient_checkpointing": use_gradient_checkpointing,
         "max_steps": max_steps, "warmup_steps": warmup_steps, "save_steps": save_steps,
@@ -844,6 +850,7 @@ def train(
         learning_rate=t.learning_rate,
         beta=t.beta,
         weight_decay=t.weight_decay,
+        max_grad_norm=t.max_grad_norm,
         warmup_steps=t.warmup_steps,
         lr_scheduler_type="linear",
         optim="adamw_8bit",

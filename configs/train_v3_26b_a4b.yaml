@@ -64,10 +64,17 @@ train:
   grad_accum: 4
   num_generations: 4
 
-  # Optimizer: keep v2-best defaults until v3 sweep 2 explores
-  learning_rate: 1.0e-5
-  beta: 0.04
+  # Optimizer: stability-tuned for the 26B-A4B MoE LoRA path. v3_baseline
+  # attempt #1 (lr=1e-5, beta=0.04, no explicit grad-clip) hit |kl|=13.07
+  # at step 2 of iter 1 — gradient norm spiked from 3 to 1028 once the
+  # advantage signal landed on the experts' LoRA. Three fixes stack:
+  #   - 5x lower LR: experts move more slowly per step
+  #   - 2.5x higher beta: stronger pull-back to ref policy stops drift
+  #   - tighter grad clip: caps the explosion at 0.5 (HF default = 1.0)
+  learning_rate: 2.0e-6
+  beta: 0.1
   weight_decay: 0.001
+  max_grad_norm: 0.5
 
   # Eval: bs=4 — 26B forward at this seq length is heavy
   eval_batch_size: 4
