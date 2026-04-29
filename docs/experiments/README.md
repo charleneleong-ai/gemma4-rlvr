@@ -52,8 +52,10 @@ diagnosis doc, not in any single sweep writeup.
 
 - [`v0_gate.md`](dd_explainer/encoder_outlier/v0_gate.md) — pre-flight encoder gate that routes OOD account contexts to "insufficient context" before Gemma generates. **Verdict: falsified for `mean_total`** (the rubric weights f1 over no_halluc so substituting fallback always loses), but the gate works as a component (heldout AUROC 0.879 across 11 mutations, no_halluc lifts +0.336 at threshold=0.5). Branch `feat/encoder-outlier-gate` merged into main.
 
-### `dd_explainer` / `train_v3_26b_a4b` (Gemma 4 26B-A4B MoE — base model swap, branch `feat/gemma-4-26b-a4b-swap`)
+### `dd_explainer` / `train_v3_26b_a4b` (Gemma 4 26B-A4B MoE — base model swap)
 
-Following the v2 + encoder-gate verdicts, the next move is base-model capacity. 26B total / 4B active sparse activation: 6.5× the parameters at the same decode latency, fits L4 INT8 for serving. See [`docs/v3-26b-a4b-migration.md`](../v3-26b-a4b-migration.md) for the migration plan.
+**Verdict: falsified 2026-04-29.** Three iters across three LRs revealed a structural MoE-LoRA gradient pathology — any LR ≥ 5e-6 explodes within 2 steps (KL > 8000), and the only stable LR (2e-6) trains too slowly to catch v2 (E7 plateau'd at mean_total=7.625 vs E18's 9.324). Postmortem in [`docs/v3-26b-a4b-migration.md`](../v3-26b-a4b-migration.md#postmortem-added-2026-04-29-after-falsification).
 
-- [`v3_baseline.md`](dd_explainer/train_v3_26b_a4b/v3_baseline.md) — first v3 sweep, anchor + long-run vs E18 (v2 champion). Pending.
+E18 (v2 4B dense, 9.324 / 7.745 / -0.888) stays the production champion.
+
+- [`v3_baseline.md`](dd_explainer/train_v3_26b_a4b/v3_baseline.md) — full per-iter trajectory + verdict + LR-landscape diagnosis.
