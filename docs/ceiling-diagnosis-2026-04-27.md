@@ -187,3 +187,36 @@ This moves hallucination out of the reward equilibrium entirely. Gemma only sees
 | E22 (granular ×1 long-run) | 2026-04-26-soften-well-formed | new | 8.933 | 7.459 | -0.896 | -0.083 | 10.7% |
 
 W&B project: <https://wandb.ai/chaleong/gemma4-rlvr>
+
+---
+
+## Update 2026-04-29: encoder-outlier gate falsified, v3 base-model swap falsified
+
+After v2 sweeps exhausted reward-side levers, two follow-up branches tested the next two hypotheses. Both falsified.
+
+### Encoder-outlier gate (PR #8, merged)
+
+OOD detection works (heldout AUROC 0.879 across 11 mutations including realistic high-debt/many-missed/in-credit cases) and `no_halluc` lifts +0.336 at threshold=0.5 — the first lever to move past the −0.88..−0.92 plateau. **But `mean_total` drops at every threshold** because the rubric weights f1 (max=10) so much higher than no_halluc (max=1) that substituting a fallback always loses ~−4.8/row. The hallucination is uniform across in-distribution rows, not concentrated on tail. Full writeup in [`docs/experiments/dd_explainer/encoder_outlier/v0_gate.md`](experiments/dd_explainer/encoder_outlier/v0_gate.md).
+
+### v3 base-model swap to Gemma 4 26B-A4B MoE (PR #10)
+
+Three iterations across three learning rates revealed a structural MoE-LoRA gradient pathology:
+
+| iter | LR | result |
+|---|---|---|
+| v3_baseline anchor (E6) | 2e-6 + clip 0.5 + beta 0.1 | EARLY_KILL @ step 8, KL=9.96 |
+| v3_baseline long (E7) | 2e-6 + clip 0.5 + beta 0.1 | KEEP, 30 steps, **mean_total=7.625** (1.7 below E18) |
+| v3_followup (E8) | 5e-6 + clip 0.5 + beta 0.1 | EARLY_KILL @ step 2, **KL=8,207** |
+
+No working LR on this base + GRPO + LoRA combination. Any rate ≥ 5e-6 explodes within 2 steps; the rate stable enough to run (2e-6) trains so slowly it plateaus below v2. The dense 4B base doesn't have this pathology because every parameter sees every token; the MoE base routes each token to a few experts whose advantage updates whip-saw. Full postmortem in [`docs/v3-26b-a4b-migration.md`](v3-26b-a4b-migration.md#postmortem-added-2026-04-29-after-falsification).
+
+### Final v2 champion: **E18** (binary ×2 long-run, multi-trigger data)
+
+| metric | value |
+|---|---|
+| mean_total | 9.324 |
+| f1_triggers | 7.745 |
+| no_halluc | -0.888 |
+| pass_all | 13.9% |
+
+E18 stays the deployed model. The full Gemma 4 family at L4-fittable sizes appears to ceiling here on this task; further gains likely require a non-Gemma swap (Qwen 3.5-9B or Llama 3.1-8B — both fit L4 INT8) which is currently a project constraint to be re-decided.

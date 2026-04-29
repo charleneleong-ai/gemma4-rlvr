@@ -1,0 +1,42 @@
+# V3 baseline follow-up — split-the-difference LR.
+#
+# v3_baseline (yesterday) ran two configs:
+#   E6 (anchor) at lr=2e-6 → EARLY_KILL at step 8 (|kl|=9.96, divergence)
+#   E7 (long)   at lr=2e-6 → KEEP 30 steps, plateau-stopped at mean_total=7.625
+#
+# Diagnosis: lr=2e-6 was too conservative — model plateau'd in 30 steps without
+# meaningfully moving from the base policy (mean_total 1.7 below E18's 9.324).
+# At lr=1e-5 the gradient diverges in 2 steps (the original failure).
+#
+# This sweep splits the difference: lr=5e-6 + warmup_steps=15 (was 30) so we
+# burn fewer steps in warmup. Single anchor iter — if this lands within 1.0
+# of E18 we run long-run next; if it diverges or stays low, the 26B-A4B
+# variant is structurally a worse fit for this task than the dense 4B.
+#
+# Decision matrix at iter end:
+#   mean_total >= 9.5  → it works, run long-run + ship as v3 champion
+#   mean_total ∈ [8.5, 9.5)  → encouraging, run long-run + sweep more
+#   mean_total < 8.5  → give up on 26B-A4B; pivot to non-Gemma or accept E18
+#   EARLY_KILL (KL>1) → divergence is fundamental at any usable LR; pivot
+
+common_overrides:
+  - "--eval-batch-size"
+  - "4"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+
+iters:
+  # Single anchor — the decisive test.
+  - config: train_v3_26b_a4b
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--warmup-steps"
+      - "15"
+    description: "26B-A4B v3 follow-up: lr=5e-6 (split-the-difference) + warmup=15 (vs E7's 7.625 / E18's 9.324)"

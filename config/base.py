@@ -63,6 +63,10 @@ class TrainSettings(BaseModel):
     learning_rate: float = 1e-5
     beta: float = 0.04
     weight_decay: float = 0.001
+    # Per-step gradient-norm clip (HF default = 1.0). Drop to 0.5 for noisy
+    # MoE-LoRA training where post-warmup grad bursts (>1000) can drive KL
+    # divergence even with small effective LR. Set to 0 to disable clipping.
+    max_grad_norm: float = 1.0
 
     lora_rank: int = 64
 

@@ -1,0 +1,91 @@
+# v3 Gemma 4 26B-A4B (MoE) preset — A100 PCIe 80GB.
+#
+# Step up from v2's `gemma-4-E4B-it` (4B dense) to `gemma-4-26B-A4B-it` —
+# 26B total parameters, 4B active per token (Mixture-of-Experts). Decode
+# latency stays ~4B-class; capability is 26B-class. Reasoning behind the
+# swap in `docs/v3-26b-a4b-migration.md`.
+#
+# **Memory budget on 80GB is genuinely tight** for 26B-A4B GRPO. Two smoke
+# attempts OOM'd before this config landed:
+#
+#   attempt 1 (planned): batch=4, grad_accum=4, num_gen=16, max_seq=8192,
+#                        lora_r=256                  → OOM at 78.57/79.25 GB
+#   attempt 2 (relaxed): batch=2, grad_accum=4, num_gen=8,  max_seq=6144,
+#                        lora_r=128                  → OOM at 78.65/79.25 GB
+#                        (deep in MoE LoRA forward)
+#   attempt 3 (THIS):    batch=1, grad_accum=4, num_gen=4,  max_seq=4096,
+#                        lora_r=64, max_completion=512
+#
+# The MoE LoRA forward materializes per-expert deltas per token — fundamentally
+# memory-hungry vs dense LoRA. KV cache during rollout dominates: at batch=B,
+# num_gen=G, max_seq=S, you're holding B*G concurrent KV caches of length S.
+# At batch=1 num_gen=4, that's 4 KV caches — ~20-25 GB at 4096 tokens — leaves
+# 30+ GB headroom for forward activations + LoRA expert deltas.
+#
+# Effective GRPO group: batch * grad_accum = 4 rollouts per grad step,
+# num_generations=4 means 1 prompt × 4 rollouts (vs v2's 1 prompt × 16).
+# Group size = 4 is the lower bound where GRPO advantage estimates still
+# carry signal; smaller and the variance-reduction benefit collapses.
+#
+# Step time: expect ~150-200s on PCIe 80GB. Training is ~2-3x slower per step
+# than v2 because the 26B base is bigger even with sparse activation, and the
+# LoRA-on-experts gradient flows through more params. Eval throughput is ~2x
+# slower (more weights to forward through). Keep `--max-steps 80` for
+# autoresearch iters; full long-runs at 160 will take 5-7 hours.
+#
+# Inference target: L4 GPU on Cloud Run with INT8 quantization.
+#   - 26B INT8 weights ~ 13 GB   - leaves 8-10 GB on L4 for KV + batch=4-8
+#   - 26B INT4 (AWQ/GPTQ) ~ 6.5 GB - production option, batch=16+
+#
+# See docs/v3-26b-a4b-migration.md for the full plan.
+
+defaults:
+  - train
+  - _self_
+
+train:
+  # Model: Gemma 4 26B-A4B MoE (26B total, 4B active/tok)
+  model_name: unsloth/gemma-4-26B-A4B-it
+
+  # Memory: 4-bit base + r=64 LoRA. The MoE expert-LoRA forward path is
+  # memory-hungry; even r=128 + batch=2 + num_gen=8 OOM'd. r=64 halves
+  # LoRA params and the per-expert delta materialization cost.
+  load_in_4bit: true
+  lora_rank: 64
+  max_seq_length: 4096
+  max_completion_length: 512
+
+  # GRPO: minimum viable. batch=1 means 1 prompt per grad step with
+  # num_generations=4 rollouts. Group size of 4 is the floor where GRPO
+  # advantage normalisation still carries useful variance-reduction signal.
+  # Constraint: (batch_size * grad_accum) % num_generations == 0
+  # 1 * 4 = 4, divisible by num_generations=4. ✓
+  batch_size: 1
+  grad_accum: 4
+  num_generations: 4
+
+  # Optimizer: stability-tuned for the 26B-A4B MoE LoRA path. v3_baseline
+  # attempt #1 (lr=1e-5, beta=0.04, no explicit grad-clip) hit |kl|=13.07
+  # at step 2 of iter 1 — gradient norm spiked from 3 to 1028 once the
+  # advantage signal landed on the experts' LoRA. Three fixes stack:
+  #   - 5x lower LR: experts move more slowly per step
+  #   - 2.5x higher beta: stronger pull-back to ref policy stops drift
+  #   - tighter grad clip: caps the explosion at 0.5 (HF default = 1.0)
+  learning_rate: 2.0e-6
+  beta: 0.1
+  weight_decay: 0.001
+  max_grad_norm: 0.5
+
+  # Eval: bs=4 — 26B forward at this seq length is heavy
+  eval_batch_size: 4
+  eval_heldout_n: 1000
+  eval_regression_n: 100
+
+  # Schedule: short autoresearch iter (extend via CLI for full runs)
+  max_steps: 80
+  warmup_steps: 30
+  save_steps: 50
+  seed: 42
+
+wandb:
+  tags: ["gemma4", "rlvr", "dd-explainer", "26b-a4b", "v3"]
