@@ -55,6 +55,59 @@ from train_outlier_encoder import (  # noqa: E402
     _zscore_fit,
 )
 
+# Trigger-discriminator features — boolean / numeric markers that the data
+# generator uses to define the per-trigger ground truth. Three encoders
+# (bge-small, bge-base, qwen3-0.6B) all plateau at F1=0.55-0.70 on Manual
+# reduction / Exemption Expiry / Change in usage because those triggers are
+# defined by isolated booleans the linear head can't pull out of the JSON
+# embedding. Surfacing them explicitly turns the multi-label task into a
+# rule-decoding one for these 3 classes.
+CLASSIFIER_EXTRA_FEATURE_NAMES = (
+    "older_change_is_manually_reduced",       # → Manual reduction
+    "older_change_reason_is_customer_request",# → Manual reduction
+    "older_change_is_exemption",              # → Exemption Expiry
+    "older_change_exemption_expired",         # → Exemption Expiry
+    "abs_electricity_change_percent",         # → Change in usage
+    "abs_gas_change_percent",                 # → Change in usage
+)
+
+
+def _extract_classifier_extra_features(input_json: dict[str, Any]) -> list[float]:
+    """Trigger-discriminator features. Returned in the order of
+    CLASSIFIER_EXTRA_FEATURE_NAMES. Boolean values become 0.0/1.0."""
+    ac = input_json.get("account_context", {}) or {}
+    ldd = input_json.get("latest_dd_change", {}) or {}
+    dd_history = ac.get("dd_change_history") or []
+    older = dd_history[0] if dd_history else {}
+
+    # Bool markers — generator sets these on `dd_change_history[0]`
+    is_manual = bool(older.get("is_amount_manually_reduced_lower_than_recommended_amount"))
+    is_customer_request = (older.get("reason_for_DD_change") == "customer request")
+    is_exemption = bool(older.get("is_exemption"))
+
+    # Exemption expired = expiry_date < latest_dd_change.datetime_from
+    exemption_expired = False
+    expiry = older.get("exemption_expiry_date")
+    latest_from = ldd.get("datetime_from")
+    if expiry and latest_from:
+        # Both should be ISO-format strings; lexicographic compare works
+        # for valid ISO dates even with mixed datetime / date precision.
+        exemption_expired = str(expiry) < str(latest_from)
+
+    # Consumption change % per fuel
+    pch = ac.get("projected_consumption_history") or {}
+    elec = (pch.get("electricity") or {}).get("change_percent") or 0.0
+    gas = (pch.get("gas") or {}).get("change_percent") or 0.0
+
+    return [
+        1.0 if is_manual else 0.0,
+        1.0 if is_customer_request else 0.0,
+        1.0 if is_exemption else 0.0,
+        1.0 if exemption_expired else 0.0,
+        abs(float(elec)),
+        abs(float(gas)),
+    ]
+
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
 # Six explicit triggers — no "No triggers identified" in the classifier output.
@@ -308,13 +361,30 @@ def main(
     train_num = (train_num - feature_mean) / feature_std
     heldout_num = (heldout_num - feature_mean) / feature_std
 
-    train_X = torch.cat([train_emb, train_num], dim=-1)
-    heldout_X = torch.cat([heldout_emb, heldout_num], dim=-1)
+    # Classifier-extra features: trigger-discriminator booleans/numerics that
+    # the bge encoder was failing to surface from the JSON. NOT z-scored —
+    # they're already in [0,1] for booleans and 0-25 for change_percent which
+    # the head can scale via its weights.
+    train_extra = torch.tensor(
+        [_extract_classifier_extra_features(r["input_json"]) for r in train_rows],
+        dtype=torch.float32,
+        device=device,
+    )
+    heldout_extra = torch.tensor(
+        [_extract_classifier_extra_features(r["input_json"]) for r in heldout_rows],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    train_X = torch.cat([train_emb, train_num, train_extra], dim=-1)
+    heldout_X = torch.cat([heldout_emb, heldout_num, heldout_extra], dim=-1)
     head_in_dim = train_X.shape[-1]
     typer.echo(
-        f"input dim: {head_in_dim} ({embed_dim} bge + {train_num.shape[-1]} numeric "
-        f"[{', '.join(NUMERIC_FEATURE_NAMES)}])"
+        f"input dim: {head_in_dim} = {embed_dim} embed + {train_num.shape[-1]} numeric + "
+        f"{train_extra.shape[-1]} classifier-extra"
     )
+    typer.echo(f"  numeric: {', '.join(NUMERIC_FEATURE_NAMES)}")
+    typer.echo(f"  classifier-extra: {', '.join(CLASSIFIER_EXTRA_FEATURE_NAMES)}")
 
     # Class imbalance: pos_weight per trigger = (n_neg / n_pos)
     pos_weight = torch.tensor(
