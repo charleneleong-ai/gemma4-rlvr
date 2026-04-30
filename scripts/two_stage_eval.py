@@ -39,6 +39,7 @@ from dd_explainer_rewards import score_completion  # noqa: E402
 from dd_explainer_two_stage import (  # noqa: E402
     TwoStageClassifier,
     build_two_stage_prompt,
+    extract_valid_facts,
 )
 from train import (  # noqa: E402
     _aggregate_scores,
@@ -78,6 +79,14 @@ def main(
     max_completion_length: int = typer.Option(1024),
     batch_size: int = typer.Option(32),
     lora_rank: int = typer.Option(128),
+    constrain_facts: bool = typer.Option(
+        False,
+        "--constrain-facts/--no-constrain-facts",
+        help="If set, the two-stage pass injects an explicit allowed-list of "
+             "valid tariff names + rate percentages into the prompt. The LLM is "
+             "instructed to cite only from this list — directly attacks the "
+             "no_halluc plateau.",
+    ),
     out: Path = typer.Option(
         Path("data/two_stage_eval_v0.json"),
         help="Where to dump the comparison JSON.",
@@ -130,14 +139,18 @@ def main(
     typer.echo(f"  vanilla done in {(time.monotonic() - t0) / 60:.1f}min")
 
     # Two-stage generation: same model, modified prompts
-    typer.echo("\nrunning Gemma E18 with Stage-1-injected prompts on the full heldout…")
+    if constrain_facts:
+        typer.echo("\nrunning Gemma E18 with Stage-1 + VALID FACTS allowed-list prompts…")
+    else:
+        typer.echo("\nrunning Gemma E18 with Stage-1-injected prompts on the full heldout…")
     t0 = time.monotonic()
     two_stage_completions: list[str] = []
     for start in range(0, n, batch_size):
         chunk_msgs = []
         for i in range(start, min(start + batch_size, n)):
             base = heldout_ds[i]["prompt"]
-            modified = build_two_stage_prompt(base, predicted_triggers[i])
+            facts = extract_valid_facts(heldout_ds[i]["input_json"]) if constrain_facts else None
+            modified = build_two_stage_prompt(base, predicted_triggers[i], valid_facts=facts)
             chunk_msgs.append(modified)
         two_stage_completions.extend(_generate_batch(model, tokenizer, chunk_msgs, max_completion_length))
         done = min(start + batch_size, n)

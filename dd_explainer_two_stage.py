@@ -154,9 +154,55 @@ class TwoStageClassifier:
         return triggers
 
 
+def extract_valid_facts(input_json: dict[str, Any]) -> dict[str, list]:
+    """Pull citation-eligible facts from input_json — matches the contract
+    that `reward_no_hallucinated_facts` validates against.
+
+    Returns:
+        {
+            "tariffs": [str, ...],            # case-preserved tariff names
+            "rate_percentages": [float, ...], # rate change %s; reward only
+                                              # validates citations with abs() >= 1.0
+        }
+
+    Used to build a prompt-time constraint that surfaces the verbatim
+    allowed-list to the LLM. The LLM is then instructed to only cite
+    facts from this list, eliminating the no_halluc plateau by removing
+    the LLM's freedom to invent facts.
+    """
+    ac = input_json.get("account_context", {}) or {}
+    contracts = ac.get("contract_history") or []
+
+    tariffs: list[str] = []
+    seen_t: set[str] = set()
+    for ch in contracts:
+        name = (ch.get("tariff_name") or "").strip()
+        if name and name.lower() not in seen_t:
+            seen_t.add(name.lower())
+            tariffs.append(name)
+
+    pcts: list[float] = []
+    seen_p: set[float] = set()
+    for ch in contracts:
+        for rh in ch.get("contract_rates_history") or []:
+            for rate in rh.get("rates") or []:
+                v = rate.get("change_since_previous_rate_percent")
+                if v is None:
+                    continue
+                fv = round(float(v), 2)
+                if fv not in seen_p:
+                    seen_p.add(fv)
+                    pcts.append(fv)
+    pcts.sort()
+
+    return {"tariffs": tariffs, "rate_percentages": pcts}
+
+
 def build_two_stage_prompt(
     base_messages: list[dict[str, Any]],
     triggers: list[str],
+    *,
+    valid_facts: dict[str, list] | None = None,
 ) -> list[dict[str, Any]]:
     """Modify a `build_chat_messages` output to include predicted triggers.
 
@@ -164,6 +210,11 @@ def build_two_stage_prompt(
     pre-fills the trigger choices, leaving the LLM to infill `header` and
     `explanation`. Preserves the system message + the existing user prompt
     structure so the LLM still sees the full account context.
+
+    If `valid_facts` is given (output of `extract_valid_facts`), also appends
+    a "VALID FACTS" allowed-list block. The LLM is instructed to only cite
+    these tariffs / rate-percentages and not invent others — this is the
+    prompt-time constrained-decoding lever that targets the no_halluc plateau.
 
     `base_messages` is the output of `dd_explainer_data_generator.build_chat_messages(pin)`.
     """
@@ -193,6 +244,34 @@ def build_two_stage_prompt(
             "keep the trigger field as given):\n"
             f"{json.dumps({'explanations': template_explanations}, indent=2)}\n"
         )
+
+        if valid_facts is not None:
+            tariffs = valid_facts.get("tariffs") or []
+            rate_pcts = valid_facts.get("rate_percentages") or []
+            tariff_block = (
+                "\n".join(f"  - \"{t}\"" for t in tariffs)
+                if tariffs else "  (no tariff names available — do not cite any)"
+            )
+            # Reward only checks citations with abs() >= 1.0; surface those plus
+            # 0%-style "no change" so the LLM has accurate context for prose.
+            pct_block = (
+                "\n".join(f"  - {p:+.2f}%" for p in rate_pcts)
+                if rate_pcts else "  (no rate changes available — do not cite any)"
+            )
+            suffix += (
+                "\n"
+                "GROUNDING CONSTRAINT — VALID FACTS YOU MAY CITE:\n"
+                "The ONLY tariff names + rate-change percentages allowed in your "
+                "explanation are the ones listed below. They come verbatim from "
+                "the account_context above. Do NOT invent or paraphrase any other "
+                "tariff name or percentage; doing so will fail the no_hallucinated_facts rubric.\n\n"
+                "Allowed tariff names:\n"
+                f"{tariff_block}\n\n"
+                "Allowed rate change percentages (cite verbatim, magnitudes >=1.0% are checked):\n"
+                f"{pct_block}\n\n"
+                "If a trigger does not require citing a tariff or rate, simply "
+                "describe the change qualitatively without specific facts.\n"
+            )
         # Content is a list of typed blocks (per `build_chat_messages` shape)
         new_content = []
         for block in msg["content"]:
@@ -205,4 +284,4 @@ def build_two_stage_prompt(
     return new_messages
 
 
-__all__ = ["TwoStageClassifier", "build_two_stage_prompt"]
+__all__ = ["TwoStageClassifier", "build_two_stage_prompt", "extract_valid_facts"]
