@@ -71,7 +71,7 @@ def main(
     """Run Stage 1 over every dataset row and cache the predicted triggers."""
     typer.echo(f"loading Stage 1 classifier from {classifier_path}…")
     classifier = TwoStageClassifier.load(classifier_path)
-    typer.echo(f"  ready (head_in_dim={classifier.head.in_features})")
+    typer.echo(f"  ready (head_in_dim={classifier.head_in_dim})")
 
     rows = _load_dataset_rows(data_dir)
 

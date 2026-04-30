@@ -76,10 +76,20 @@ class TwoStageClassifier:
         self.numeric_mean = numeric_mean
         self.numeric_std = numeric_std
         self.threshold = threshold
+        # Convenience: head_in_dim from the first Linear layer regardless of
+        # whether `head` is bare Linear or wrapped in Sequential.
+        first_linear = head if isinstance(head, nn.Linear) else next(
+            m for m in head.modules() if isinstance(m, nn.Linear)
+        )
+        self.head_in_dim = first_linear.in_features
 
     @classmethod
     def load(cls, head_path: Path | str) -> TwoStageClassifier:
-        """Load a classifier head saved by `scripts/train_trigger_classifier.py`."""
+        """Load a classifier head saved by `scripts/train_trigger_classifier.py`.
+
+        Supports both 'linear' (v0-v3) and '2-layer-mlp' (v4+) head types.
+        Falls back to 'linear' when `head_type` is absent for backwards-compat.
+        """
         ckpt = torch.load(Path(head_path), map_location="cpu", weights_only=False)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -88,9 +98,21 @@ class TwoStageClassifier:
         for p in encoder.parameters():
             p.requires_grad = False
 
-        head = nn.Linear(ckpt["head_in_dim"], len(TRIGGER_LABELS)).to(device)
-        head.weight.data = ckpt["weight"].to(device)
-        head.bias.data = ckpt["bias"].to(device)
+        head_type = ckpt.get("head_type", "linear")
+        if head_type == "linear":
+            head: nn.Module = nn.Linear(ckpt["head_in_dim"], len(TRIGGER_LABELS)).to(device)
+            head.weight.data = ckpt["weight"].to(device)
+            head.bias.data = ckpt["bias"].to(device)
+        elif head_type == "2-layer-mlp":
+            head = nn.Sequential(
+                nn.Linear(ckpt["head_in_dim"], ckpt["mlp_hidden"]),
+                nn.GELU(),
+                nn.Dropout(ckpt["mlp_dropout"]),
+                nn.Linear(ckpt["mlp_hidden"], len(TRIGGER_LABELS)),
+            ).to(device)
+            head.load_state_dict({k: v.to(device) for k, v in ckpt["state_dict"].items()})
+        else:
+            raise ValueError(f"Unknown head_type {head_type!r}")
         head.eval()
 
         return cls(

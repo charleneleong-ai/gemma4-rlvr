@@ -88,7 +88,7 @@ def main(
 
     typer.echo(f"loading Stage 1 classifier from {classifier_path}…")
     classifier = TwoStageClassifier.load(classifier_path)
-    typer.echo(f"  classifier ready: head_in_dim={classifier.head.in_features}")
+    typer.echo(f"  classifier ready: head_in_dim={classifier.head_in_dim}")
 
     typer.echo(f"loading {model_name} + LoRA from {lora_path}…")
     model, tokenizer = _load_model(model_name, max_seq_length, lora_rank, lora_path=lora_path)
