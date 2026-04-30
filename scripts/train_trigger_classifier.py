@@ -286,6 +286,15 @@ def main(
     weight_decay: float = typer.Option(1e-4, help="AdamW weight decay"),
     threshold: float = typer.Option(0.5, help="Sigmoid threshold for binary prediction"),
     seed: int = typer.Option(42, help="RNG seed for split + init"),
+    head_type: str = typer.Option(
+        "linear",
+        "--head-type",
+        help="'linear' = single-layer head (v0-v3); '2-layer-mlp' = "
+             "Linear(in→hidden) → GELU → Dropout → Linear(hidden→out). "
+             "More capacity for non-linear class boundaries.",
+    ),
+    mlp_hidden: int = typer.Option(128, help="Hidden dim when --head-type=2-layer-mlp"),
+    mlp_dropout: float = typer.Option(0.1, help="Dropout between MLP layers"),
     save_head: Path | None = typer.Option(
         Path("data/trigger_classifier_v0.pt"),
         help="Path to save trained linear head (None to skip).",
@@ -397,10 +406,26 @@ def main(
         device=device,
     )
 
-    head = nn.Linear(head_in_dim, N_TRIGGERS).to(device)
+    if head_type == "linear":
+        head: nn.Module = nn.Linear(head_in_dim, N_TRIGGERS).to(device)
+    elif head_type == "2-layer-mlp":
+        head = nn.Sequential(
+            nn.Linear(head_in_dim, mlp_hidden),
+            nn.GELU(),
+            nn.Dropout(mlp_dropout),
+            nn.Linear(mlp_hidden, N_TRIGGERS),
+        ).to(device)
+    else:
+        raise typer.BadParameter(
+            f"--head-type must be 'linear' or '2-layer-mlp', got {head_type!r}"
+        )
     optimizer = torch.optim.AdamW(head.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    typer.echo(f"head: {sum(p.numel() for p in head.parameters())} trainable params, {epochs} epochs")
+    typer.echo(
+        f"head: type={head_type}, "
+        f"{sum(p.numel() for p in head.parameters())} trainable params, "
+        f"{epochs} epochs"
+    )
 
     # Train
     for epoch in range(1, epochs + 1):
@@ -454,24 +479,28 @@ def main(
 
     if save_head is not None:
         save_head.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "weight": head.weight.detach().cpu(),
-                "bias": head.bias.detach().cpu(),
-                "encoder": model_name,
-                "embed_dim": embed_dim,
-                "head_in_dim": head_in_dim,
-                "trigger_labels": list(TRIGGER_LABELS),
-                "numeric_feature_names": list(NUMERIC_FEATURE_NAMES),
-                "numeric_mean": feature_mean.detach().cpu(),
-                "numeric_std": feature_std.detach().cpu(),
-                "threshold": threshold,
-                "heldout_macro_f1": metrics["_macro_f1"],
-                "heldout_micro_f1": metrics["_micro_f1"],
-                "heldout_exact_match": em,
-            },
-            save_head,
-        )
+        ckpt: dict[str, Any] = {
+            "encoder": model_name,
+            "embed_dim": embed_dim,
+            "head_in_dim": head_in_dim,
+            "head_type": head_type,
+            "trigger_labels": list(TRIGGER_LABELS),
+            "numeric_feature_names": list(NUMERIC_FEATURE_NAMES),
+            "numeric_mean": feature_mean.detach().cpu(),
+            "numeric_std": feature_std.detach().cpu(),
+            "threshold": threshold,
+            "heldout_macro_f1": metrics["_macro_f1"],
+            "heldout_micro_f1": metrics["_micro_f1"],
+            "heldout_exact_match": em,
+        }
+        if head_type == "linear":
+            ckpt["weight"] = head.weight.detach().cpu()
+            ckpt["bias"] = head.bias.detach().cpu()
+        else:  # 2-layer-mlp — save the full state_dict
+            ckpt["state_dict"] = {k: v.detach().cpu() for k, v in head.state_dict().items()}
+            ckpt["mlp_hidden"] = mlp_hidden
+            ckpt["mlp_dropout"] = mlp_dropout
+        torch.save(ckpt, save_head)
         typer.echo(f"\nsaved classifier to {save_head}")
 
 
