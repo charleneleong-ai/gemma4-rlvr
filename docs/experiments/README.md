@@ -56,6 +56,10 @@ diagnosis doc, not in any single sweep writeup.
 
 **Verdict: falsified 2026-04-29.** Three iters across three LRs revealed a structural MoE-LoRA gradient pathology — any LR ≥ 5e-6 explodes within 2 steps (KL > 8000), and the only stable LR (2e-6) trains too slowly to catch v2 (E7 plateau'd at mean_total=7.625 vs E18's 9.324). Postmortem in [`docs/v3-26b-a4b-migration.md`](../v3-26b-a4b-migration.md#postmortem-added-2026-04-29-after-falsification).
 
-E18 (v2 4B dense, 9.324 / 7.745 / -0.888) stays the production champion.
-
 - [`v3_baseline.md`](dd_explainer/train_v3_26b_a4b/v3_baseline.md) — full per-iter trajectory + verdict + LR-landscape diagnosis.
+
+### `dd_explainer` / `two_stage` (architectural decoupling — Stage 1 classifier + Stage 2 LLM explainer) ⭐ NEW CHAMPION
+
+**Verdict: confirmed 2026-04-29 — first config across 26 experiments to break mean_total = 10.** Stage 1 frozen `bge-small` + 9 numeric features + 6 trigger-discriminator features + linear head hits classifier rubric=8.77 (vs E18's f1=7.745). End-to-end A/B at n=1000 with Stage 1's trigger predictions injected into E18's prompt as a templated response skeleton lands **mean_total=10.293, +1.939 over vanilla E18 (4-bit inference, both passes)**. f1 lift is +1.97 (the architectural-decoupling effect); no_halluc essentially flat (-0.036). Net win is from f1 by construction, not from the trade-ridge being resolved.
+
+- [`v0_pipeline.md`](dd_explainer/two_stage/v0_pipeline.md) — Stage 1 variant exploration (bge-small/base/qwen3-0.6B + explicit features), Stage 2 wiring, n=1000 A/B verdict, sub-claim breakdown, next-move options.
