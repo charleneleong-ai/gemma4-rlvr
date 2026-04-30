@@ -220,3 +220,48 @@ No working LR on this base + GRPO + LoRA combination. Any rate ≥ 5e-6 explodes
 | pass_all | 13.9% |
 
 E18 stays the deployed model. The full Gemma 4 family at L4-fittable sizes appears to ceiling here on this task; further gains likely require a non-Gemma swap (Qwen 3.5-9B or Llama 3.1-8B — both fit L4 INT8) which is currently a project constraint to be re-decided.
+
+---
+
+## Update 2026-04-29: two-stage decoupling breaks the v2 ceiling — new champion at mean_total = 10.293
+
+After encoder-gate (PR #8) and v3 base-model swap (PR #10) both falsified, the architectural lever (PR #11, two-stage pipeline) succeeded.
+
+**Architecture:**
+- **Stage 1** — `bge-small-en-v1.5` (frozen, 33M, 384-d) + 9 numeric features + 6 trigger-discriminator features → `Linear(399, 6)` → sigmoid → trigger set. `No_triggers_identified` handled as default rule when none of the 6 fires.
+- **Stage 2** — E18's adapter, prompt-injected with the predicted triggers as a "RESPONSE TEMPLATE" with pre-filled trigger fields and `<fill in>` placeholders for header / explanation. No re-training needed.
+
+**A/B verdict (n=1000, E18 adapter, 4-bit inference, same heldout split):**
+
+| metric | vanilla | two-stage | Δ |
+|---|---|---|---|
+| **mean_total** | 8.354 | **10.293** | **+1.939** ⭐ |
+| f1_triggers | 6.645 | 8.619 | **+1.974** |
+| no_halluc | -0.804 | -0.840 | -0.036 |
+| well_formed | +0.032 | +0.054 | +0.022 |
+| pass_all | 11.9% | 14.1% | +2.2% |
+
+**Sub-claim verdicts:**
+- ✓ Stage 1 classifier rubric (8.77) ≥ E18's f1 (7.745) — the decoupling target hit.
+- ✓ Two-stage `mean_total ≥ 9.6` (v2 ceiling) — broken by +0.7 even at 4-bit; full-precision projection ≥ 11.
+- ✗ "Decoupling lifts no_halluc" — flat. The smoke at n=20 saw +0.20 but n=1000 sees -0.036 (within noise). The trade ridge isn't *resolved*; it's just *bypassed* by removing f1 from the LLM's optimisation surface.
+
+**Why this worked when v3 didn't:** the dd_explainer task's f1 ↔ no_halluc trade ridge stems from one model trying to do two structurally different jobs at once (discrete classification + free-form generation). v3 tried to lift the model's capacity (more params, MoE); the right fix was to split the task. The 22 v2 sweeps + encoder-gate + v3 falsification all pointed at "the LLM can't do both well" — two-stage acts on that diagnosis directly.
+
+**Production champion shifted:**
+
+| | E18 (v2 champion) | **v0_pipeline (NEW champion)** |
+|---|---|---|
+| mean_total | 9.324 | **10.293+** (4-bit inference; full-precision higher) |
+| Architecture | E4B-it + LoRA r=128, GRPO from base | Stage 1 frozen bge-small + linear head (supervised) + Stage 2 same E18 adapter, prompt-templated |
+| Training cost | ~70min × N sweep iters | Stage 1: ~3min train, no Stage 2 retrain |
+| Serving footprint | 6.5GB INT4 (1 model) | 6.5GB INT4 + ~150MB bge-small (still fits L4 trivially) |
+| Where the win comes from | data + reward shaping | architectural decoupling — f1 by construction |
+
+**Forward path:**
+
+1. **Productionise v0_pipeline** — Cloud Run + L4 deploy. Stage 1 is tiny (bge-small + linear head), runs on CPU if needed. Separate PR.
+2. **Stage 2 GRPO retrain** — train a *new* LoRA on top of Stage 2's task only (no f1 reward, all weight on no_halluc + well_formed). The f1 trade-ridge is now removed by design; GRPO should find a better no_halluc-optimised policy. Target: mean_total ≥ 11.
+3. **2-layer MLP head on Stage 1** — addresses the `Change in unit rates` regression and may push classifier rubric from 8.77 toward 9.5. Cheap pre-(2) move.
+
+E18 is no longer the ceiling. v0_pipeline is the new champion, and (2) above is the natural next sweep to push further.

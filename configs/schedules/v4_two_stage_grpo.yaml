@@ -1,0 +1,66 @@
+# V4 two-stage GRPO — train Stage 2 LoRA on prompts pre-loaded with Stage 1 triggers.
+#
+# v0_pipeline (PR #11) showed the architectural decoupling lifts mean_total
+# from 8.354 → 10.293 (n=1000 A/B at 4-bit), but the lift is almost entirely
+# from f1 (+1.97). no_halluc was flat (-0.04 within noise) because the LLM
+# still hallucinates supporting facts in the prose — it just no longer
+# hallucinates trigger choices.
+#
+# This sweep tests whether GRPO-training on the Stage 2 task (f1 saturated by
+# construction; gradient flows into no_halluc + well_formed + others) lifts
+# no_halluc past the -0.88 plateau that's been stuck across 22 v2 experiments.
+#
+# Setup:
+#   - data: prompts pre-injected with Stage 1 v3 classifier predictions
+#     (--stage1-predictions-path data/stage1_predictions_v3.json)
+#   - base: gemma-4-E4B-it (the v2 4B dense base; v3 26B-A4B falsified)
+#   - LoRA: fresh r=128 from base (same as E18); v2_80gb config
+#   - rewards: all 7 (unchanged); f1 will saturate ~10 within 1-2 steps
+#
+# Hypothesis: with f1 not eating advantage signal, GRPO finds a no_halluc
+# optimum the v2 sweeps couldn't reach. If this hits no_halluc ≥ -0.5, we
+# have a true champion. mean_total target: ≥ 11 at full precision (4-bit
+# eval typically lands ~1.0 below).
+#
+# Falsifiable: if no_halluc plateau holds at -0.88 even with f1 out of the
+# way, the issue isn't the f1 trade-ridge — it's that the LLM doesn't HAVE
+# a way to know which JSON facts to ground in. That'd point at a different
+# fix (RAG, explicit fact-extraction stage, or accept the plateau).
+#
+# ETA: anchor 80 steps × ~85s/step = ~2h, long-run 160 steps × ~85s = ~4h.
+# Total ~6h overnight.
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "8"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+  - "--stage1-predictions-path"
+  - "/workspace/gemma4_rl/data/stage1_predictions_v3.json"
+
+iters:
+  # 1. ANCHOR — 80 steps, lr=5e-6. Direct vs E18's 9.324 baseline.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+    description: "v4 two-stage GRPO anchor (lr=5e-6, Stage 1 v3 injected, vs E18 9.324)"
+
+  # 2. LONG-RUN — 160 steps. If anchor shows no_halluc movement, this confirms.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "v4 two-stage GRPO long-run (lr=5e-6, max_steps=160, vs anchor)"

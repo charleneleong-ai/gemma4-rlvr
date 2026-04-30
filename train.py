@@ -527,10 +527,21 @@ def _load_model(
     return model, tokenizer
 
 
-def _load_dataset(data_dir: Path, heldout_n: int = 0, seed: int = 42):
+def _load_dataset(
+    data_dir: Path,
+    heldout_n: int = 0,
+    seed: int = 42,
+    stage1_predictions_path: Optional[Path] = None,
+):
     """Load the newest `dd_dataset_*_*rows.jsonl`. If `heldout_n > 0`, return
     `(train_ds, heldout_ds)` where heldout is `heldout_n` rows sampled with a
     fixed seed and excluded from the train split. Otherwise return just `train_ds`.
+
+    If `stage1_predictions_path` is given, load the cached Stage 1 trigger
+    predictions and inject them into each row's prompt via
+    `build_two_stage_prompt`. This turns the GRPO task into "explain the
+    pre-given triggers" — `f1_triggers` saturates by construction, so
+    optimisation focuses on `no_halluc` + `well_formed` + others.
     """
     jsonl_files = sorted(Path(data_dir).glob("dd_dataset_*_*rows.jsonl"))
     if not jsonl_files:
@@ -542,7 +553,20 @@ def _load_dataset(data_dir: Path, heldout_n: int = 0, seed: int = 42):
     dataset = Dataset.from_json(str(path))
     if "__meta__" in dataset.column_names:
         dataset = dataset.filter(lambda r: r.get("__meta__") is not True).remove_columns("__meta__")
-    if "row_index" in dataset.column_names:
+
+    # Optional two-stage injection: load Stage 1 predictions keyed by row_index
+    # BEFORE we drop the row_index column.
+    stage1_predictions: Optional[dict[str, list[str]]] = None
+    if stage1_predictions_path is not None:
+        with open(stage1_predictions_path) as f:
+            payload = json.load(f)
+        stage1_predictions = payload["predictions"]
+        typer.echo(
+            f"Loaded {len(stage1_predictions)} Stage 1 predictions from "
+            f"{stage1_predictions_path.name}"
+        )
+
+    if "row_index" in dataset.column_names and stage1_predictions is None:
         dataset = dataset.remove_columns("row_index")
 
     # Convert legacy string-content prompts to typed-block format. transformers
@@ -561,6 +585,25 @@ def _load_dataset(data_dir: Path, heldout_n: int = 0, seed: int = 42):
         row["prompt"] = new_prompt
         return row
     dataset = dataset.map(_ensure_blocks)
+
+    # If we have Stage 1 predictions, splice them into the prompt now.
+    if stage1_predictions is not None:
+        from dd_explainer_two_stage import build_two_stage_prompt  # local — heavy import
+
+        def _inject_two_stage(row):
+            triggers = stage1_predictions.get(str(row["row_index"]))
+            if triggers:
+                row["prompt"] = build_two_stage_prompt(row["prompt"], triggers)
+            return row
+
+        dataset = dataset.map(_inject_two_stage)
+        # Drop row_index now that we're done with it
+        if "row_index" in dataset.column_names:
+            dataset = dataset.remove_columns("row_index")
+        typer.echo(
+            "Injected Stage 1 predicted triggers into every prompt — Stage 2 GRPO mode."
+        )
+
     typer.echo(f"Loaded {len(dataset)} rows from {path.name}")
 
     if heldout_n <= 0:
@@ -731,6 +774,15 @@ def train(
     eval_regression_n: Optional[int] = typer.Option(
         None, help="Regression eval rows from .error_analysis_cache. 0 to skip.",
     ),
+    stage1_predictions_path: Optional[Path] = typer.Option(
+        None,
+        "--stage1-predictions-path",
+        help="Path to a JSON cache of Stage 1 trigger predictions "
+             "(built by scripts/precompute_stage1_predictions.py). When set, "
+             "each training prompt is wrapped with build_two_stage_prompt — "
+             "f1_triggers saturates by construction so GRPO optimises on "
+             "no_halluc + well_formed + others.",
+    ),
     eval_batch_size: Optional[int] = typer.Option(None),
     completion_preview_every: Optional[int] = typer.Option(
         None, help="Log a completion preview Table to W&B every N steps. 0 to disable.",
@@ -811,9 +863,14 @@ def train(
         use_gradient_checkpointing=t.use_gradient_checkpointing,
     )
     if t.eval_heldout_n > 0:
-        dataset, heldout_ds = _load_dataset(t.data_dir, heldout_n=t.eval_heldout_n, seed=t.seed)
+        dataset, heldout_ds = _load_dataset(
+            t.data_dir,
+            heldout_n=t.eval_heldout_n,
+            seed=t.seed,
+            stage1_predictions_path=stage1_predictions_path,
+        )
     else:
-        dataset = _load_dataset(t.data_dir)
+        dataset = _load_dataset(t.data_dir, stage1_predictions_path=stage1_predictions_path)
         heldout_ds = None
 
     callbacks = []
