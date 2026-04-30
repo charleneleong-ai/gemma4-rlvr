@@ -99,3 +99,33 @@ The architectural decoupling is the right move. Two paths to compound the win:
 - Stage 2 GRPO retrain (option 2 above) — separate PR; would supersede E18.
 - 2-layer MLP head — separate small PR before any further sweeps.
 - Threshold-per-class tuning on Stage 1 — calibration set + per-class threshold optimisation.
+
+---
+
+## Update 2026-04-30: option 3 (MLP head) + v4_mlp + E18 = new champion at 10.816
+
+After the v0_pipeline writeup landed, two follow-up branches:
+
+1. **v4 GRPO retrain** with the v3 linear classifier (PR #11 commit `3e68693`) — fresh LoRA from base, GRPO on Stage-1-injected prompts. Hit `mean_total = 10.804` (E25, 30 steps long-run). f1=8.793, pass_all=12.9%. **+0.51 over v0_pipeline, but no_halluc still flat at -0.844.**
+
+2. **Option 3: 2-layer MLP head** on Stage 1 (commit `4876881`) — `Linear(399, 128) → GELU → Dropout → Linear(128, 6)` instead of a single linear layer. **Stage 1 macro_f1 jumped 0.915 → 0.990, rubric reward 8.767 → 9.840, exact_match 0.638 → 0.956.** 5/6 triggers at F1=1.000.
+
+The decisive question: with a near-perfect classifier, do we still need the GRPO retrain? Re-ran the n=1000 A/B with `v4_mlp + E18` (no retrain):
+
+| metric | vanilla E18 | v0_pipeline (v3 linear) | E25 (v4 GRPO retrain w/ v3 linear) | **v4_mlp + E18 (no retrain)** ⭐ |
+|---|---|---|---|---|
+| mean_total | 8.354 | 10.293 | 10.804 | **10.816** |
+| f1_triggers | 6.645 | 8.619 | 8.793 | **9.108** |
+| no_halluc | -0.804 | -0.840 | -0.844 | -0.848 |
+| well_formed | +0.032 | +0.054 | — | **+0.062** |
+| pass_all | 11.9% | 14.1% | 12.9% | **22.4%** |
+
+**v4_mlp + E18 (3 min Stage 1 train, no Stage 2 retrain) ties E25 (3 min + 90 min GRPO) on mean_total** and dominates on f1 (+0.315) and pass_all (+9.5 pts). The cheaper architectural path wins.
+
+### Final verdict
+
+✓ **v4_mlp + E18 is the new champion** at `mean_total = 10.816`. First config to clear `pass_all = 20%`.
+
+✓ **Stage 1 quality is the dominant lever, not Stage 2 retraining.** The MLP-head + 6 discriminator features lifted classifier rubric from 6.73 (v0) to 9.84 (v4) — far exceeding what GRPO retraining achieved on top of a weaker classifier. This shifts the project's optimization budget: future improvements should focus on Stage 1 (better calibration, threshold-per-class, more discriminator features) not on Stage 2 fine-tuning.
+
+✗ **no_halluc plateau confirmed across four architectures** (v2 sweeps with f1 in gradient, v0_pipeline with classifier-templated triggers, E25 with GRPO retrain on Stage-1-injected prompts, v4_mlp with near-perfect Stage 1). The trade-ridge hypothesis was wrong; the plateau is a 4B-base capability bound. Fixing it requires structural change (RAG, larger base) — not reward shaping.
