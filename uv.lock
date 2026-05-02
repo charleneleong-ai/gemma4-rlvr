@@ -281,8 +281,8 @@ wheels = [
 
 [[package]]
 name = "autoresearch"
-version = "0.5.1"
-source = { git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=v0.5.1#0e8a1f2faac5019b3c2877de6b18fe782c416c1c" }
+version = "0.7.0"
+source = { git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=v0.7.0#cb19322e23d0e65025676c1610cde86cd215a802" }
 dependencies = [
     { name = "matplotlib" },
     { name = "plotly" },
@@ -953,7 +953,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "autoresearch", git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=v0.5.1" },
+    { name = "autoresearch", git = "ssh://git@github.com/charleneleong-ai/autoresearch.git?rev=v0.7.0" },
     { name = "bitsandbytes" },
     { name = "datasets" },
     { name = "hydra-core" },
