@@ -49,9 +49,15 @@ Schema, rubric, prompt-template additions only. No model retraining, no inferenc
 
 ### Phase 2 — slot enforcement at decode time (PR-B)
 
-Add `lm-format-enforcer` (or Outlines) to `pyproject.toml`. Build a `LogitsProcessor` that constrains:
-- `tariff_cited` ∈ `extract_valid_facts(input_json)["tariffs"]`
-- `rate_change_pct_cited` ∈ `extract_valid_facts(input_json)["rate_percentages"]`
+Use **`lm-format-enforcer`** (LMFE) — chosen over Outlines because the allowed-list is per-row; LMFE's lazy character-level FSA reroutes per row in microseconds while Outlines would recompile a token-level DFA per row at ~0.5s, dwarfing generation cost at n=1000.
+
+The LMFE integration lives in [`dd_explainer_slot_decoder.py`](../../../../dd_explainer_slot_decoder.py):
+
+- `build_slot_enforcement_schema(valid_facts)` — per-row JSON schema with `tariff_cited` / `rate_change_pct_cited` enums; `null` allowed when the row has no valid facts.
+- `build_slot_prefix_fn(tokenizer, per_row_schemas)` — batched `prefix_allowed_tokens_fn` that routes by `batch_id` to a row-specific `TokenEnforcer`.
+- Compat shim aliases `transformers.tokenization_utils.PreTrainedTokenizerBase` (LMFE 0.11.3 imports the pre-5.x location) and unwraps `Gemma4Processor.tokenizer` for Unsloth's multimodal-wrapped Gemma 4.
+
+`scripts/two_stage_eval.py --enforce-slots` runs the A/B; combine with `--constrain-facts` so the model also sees the textual hint.
 
 Test at n=20 smoke, then n=1000 A/B vs PR #12's `--constrain-facts` baseline (mean_total=10.961, no_halluc=-0.732).
 
