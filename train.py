@@ -1117,8 +1117,18 @@ _PASS_ALL_THRESHOLD: dict = {"prev_amount_correct": 0.0}
 
 
 @torch.no_grad()
-def _generate_batch(model, tokenizer, messages_list, max_completion_length: int) -> list[str]:
-    """Batched temp=0 generation. ~5-8x throughput vs single-row on A100."""
+def _generate_batch(
+    model,
+    tokenizer,
+    messages_list,
+    max_completion_length: int,
+    prefix_allowed_tokens_fn=None,
+) -> list[str]:
+    """Batched temp=0 generation. ~5-8x throughput vs single-row on A100.
+
+    `prefix_allowed_tokens_fn` is HF's per-step token-mask callback —
+    `fn(batch_id, input_ids) -> list[int]`. Used by PR-B's slot-enforced
+    decoding (see `dd_explainer_slot_decoder.build_slot_prefix_fn`)."""
     if not messages_list:
         return []
     if tokenizer.pad_token_id is None:
@@ -1131,11 +1141,14 @@ def _generate_batch(model, tokenizer, messages_list, max_completion_length: int)
         text=texts, add_special_tokens=False, return_tensors="pt",
         padding=True, padding_side="left",
     ).to("cuda")
-    out = model.generate(
+    generate_kwargs = dict(
         **enc, max_new_tokens=max_completion_length,
         temperature=0.0, do_sample=False, use_cache=True,
         pad_token_id=tokenizer.pad_token_id,
     )
+    if prefix_allowed_tokens_fn is not None:
+        generate_kwargs["prefix_allowed_tokens_fn"] = prefix_allowed_tokens_fn
+    out = model.generate(**generate_kwargs)
     prompt_len = enc["input_ids"].shape[1]
     return [tokenizer.decode(seq[prompt_len:], skip_special_tokens=True) for seq in out]
 
