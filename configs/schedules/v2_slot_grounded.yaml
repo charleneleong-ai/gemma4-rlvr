@@ -9,9 +9,12 @@
 #
 # This sweep adds `reward_no_hallucinated_facts_slots` to REWARD_FUNCS
 # (via --slot-reward-weight) so GRPO gets gradient signal toward
-# populating slots with valid values. We bracket two weights to find the
-# sweet spot, plus one fresh-from-base reset to test whether starting
-# from E18 or starting clean works better with the new reward.
+# populating slots with valid values. Bracket weights at ×{1,3} on the
+# anchor + a long-run at ×2 to find the sweet spot.
+#
+# Pattern matches E25 (v4_two_stage_grpo): fresh-from-base + Stage-1
+# predictions injected into the prompt. `train.py` doesn't support
+# initialising from a saved LoRA, so we always start from the 4B base.
 #
 # Falsification thresholds (n=100 regression eval):
 #   no_halluc(slots) > 0.5  → slots being populated, train more iters
@@ -22,6 +25,7 @@
 # Comparison anchors (n=1000):
 #   E18 (PR #12 baseline w/ constrain-facts):  mean_total=10.961, no_halluc=-0.732
 #   E18 + LMFE slot mask (PR-B):                mean_total=10.966, no_halluc=-0.724
+#   E25 (v4_two_stage_grpo, no slot reward):    mean_total=10.804, no_halluc=-0.844
 #
 # Each iteration ≈ 90 min train + 15 min eval = ~2 h on 80GB A100.
 # Total sweep ~6 h.
@@ -41,39 +45,33 @@ common_overrides:
   - "granular"
   - "--no-halluc-weight"
   - "2.0"
+  - "--stage1-predictions-path"
+  - "/workspace/gemma4_rl/data/stage1_predictions_v3.json"
 
 iters:
-  # 1. ANCHOR — slot weight=1.0 on top of E18's existing GRPO setup.
-  #    Resumes from E18, adds slot reward as 8th component.
+  # 1. ANCHOR — slot weight=1.0. Direct comparison vs E25 (10.804/-0.844).
   - config: train_v2_80gb
     overrides:
       - "--learning-rate"
       - "5.0e-6"
-      - "--lora-path"
-      - "gemma_4_lora/train_v2_80gb/exp_18"
       - "--slot-reward-weight"
       - "1.0"
       - "--max-steps"
       - "80"
-    description: "E18 → +slot reward ×1.0 (anchor) — does GRPO learn to populate slots?"
+    description: "anchor: stage1 + slot reward ×1.0 + 80 steps (vs E25 10.804/-0.844)"
 
-  # 2. WEIGHTED slot reward — push gradient harder on slot dimension.
+  # 2. WEIGHTED — push gradient harder on slot dimension.
   - config: train_v2_80gb
     overrides:
       - "--learning-rate"
       - "5.0e-6"
-      - "--lora-path"
-      - "gemma_4_lora/train_v2_80gb/exp_18"
       - "--slot-reward-weight"
       - "3.0"
       - "--max-steps"
       - "80"
-    description: "E18 → +slot reward ×3.0 — bracket on weight axis"
+    description: "stage1 + slot reward ×3.0 + 80 steps (bracket on weight axis)"
 
-  # 3. FRESH-FROM-BASE — does starting clean with the new reward beat
-  #    continuing from E18's old behavior? E18 was trained without slot
-  #    rewards so it has a strong "emit null" prior; fresh start may
-  #    converge faster.
+  # 3. LONG-RUN — middle weight, more steps to let slot population converge.
   - config: train_v2_80gb
     overrides:
       - "--learning-rate"
@@ -81,7 +79,9 @@ iters:
       - "--slot-reward-weight"
       - "2.0"
       - "--max-steps"
-      - "120"
+      - "160"
       - "--patience"
       - "15"
-    description: "Fresh from base + slot ×2.0 (no E18 init) — does the prior matter?"
+      - "--plateau-window"
+      - "15"
+    description: "stage1 + slot reward ×2.0 + 160 steps (long-run middle weight)"

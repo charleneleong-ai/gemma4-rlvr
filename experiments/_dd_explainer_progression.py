@@ -74,10 +74,24 @@ MILESTONES: list[Milestone] = [
     ),
     Milestone(
         label="v2_slot",
-        full="v4_mlp + E18 + LMFE slot mask (PR-B, this PR) — flat vs PR #12",
+        full="v4_mlp + E18 + LMFE slot mask (PR-B) — flat vs PR #12",
         mean_total=10.966,
         no_halluc=-0.724,
         pass_all_pct=23.2,
+    ),
+    Milestone(
+        label="E26 (×3.0)",
+        full="PR-C iter 1 — slot reward ×3.0 + 80 steps (over-weighted, regressed prose)",
+        mean_total=10.801,
+        no_halluc=-0.924,
+        pass_all_pct=12.1,
+    ),
+    Milestone(
+        label="E27 (×2.0)",
+        full="PR-C iter 2 — slot reward ×2.0 + 160 steps (new SOTA mean_total, prose recovered)",
+        mean_total=11.192,
+        no_halluc=-0.744,
+        pass_all_pct=17.0,
     ),
 ]
 
@@ -118,7 +132,7 @@ def render(out: Path) -> None:
             ha="center", fontsize=8, color="#1e40af",
         )
 
-    # Highlight the new PR-B point
+    # Highlight the new SOTA point (E27)
     ax_total.scatter([xs[-1]], [mean_totals[-1]], s=160, facecolors="none",
                      edgecolors="#2563eb", linewidth=2, zorder=5)
 
@@ -128,13 +142,13 @@ def render(out: Path) -> None:
     ax_halluc.set_ylabel("no_hallucinated_facts (rendered prose)", color="#dc2626")
     ax_total.tick_params(axis="y", labelcolor="#2563eb")
     ax_halluc.tick_params(axis="y", labelcolor="#dc2626")
-    ax_total.set_ylim(7.5, 11.5)
+    ax_total.set_ylim(7.5, 11.7)
     ax_halluc.set_ylim(-1.0, 0.0)
     ax_total.grid(True, alpha=0.25)
 
     ax_total.set_title(
         "dd_explainer two_stage — cross-experiment progression on n=1000 heldout\n"
-        "PR-B (v2_slot) flat vs v1_constrained → slot enforcement is a no-op without retrain (→ PR-C)",
+        "PR-C E27 (×2.0) is new SOTA on mean_total but prose plateau didn't break (-0.74 ≈ PR-B -0.72)",
         fontsize=11, pad=12,
     )
 
