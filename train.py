@@ -1163,6 +1163,13 @@ def _aggregate_scores(rows: list[dict]) -> dict:
         out[f"{k}_pass"] = sum(1 for v in vals if v >= mx - 1e-6)
         out[f"{k}_mean"] = round(sum(vals) / n, 3)
     out["mean_total"] = round(sum(sum(row.get(k, 0.0) for k in _REWARD_MAX) for row in rows) / n, 3)
+    # Side metrics — diagnostic only, NOT in mean_total / pass_all so PR #12
+    # baselines stay apples-to-apples.
+    side_metrics = ("no_hallucinated_facts_slots",)
+    for k in side_metrics:
+        if any(k in row for row in rows):
+            vals = [row.get(k, 0.0) for row in rows]
+            out[f"{k}_mean"] = round(sum(vals) / n, 3)
     return out
 
 
