@@ -65,9 +65,31 @@ Test at n=20 smoke, then n=1000 A/B vs PR #12's `--constrain-facts` baseline (me
 
 If PR-B clears `no_halluc_prose ≥ -0.5` on E18 alone, we ship and skip PR-C. If E18 doesn't know how to populate slots well (the regression in well_formed exceeds the slot lift), retrain a new adapter that learns the schema. Sweep recipe will live at `configs/schedules/v2_slot_grounded.yaml`.
 
-## Verdict
+## Verdict (PR-B, n=1000)
 
-**TBD** — Phase 1 (this PR) ships the foundation. PR-B will run the n=1000 A/B and post the verdict here.
+**Falsified for shipping as champion** — PR-B is essentially flat vs PR #12.
+
+| metric | vanilla | PR-B (constrain + enforce-slots) | vs PR #12 (constrain only) |
+|---|---|---|---|
+| mean_total | 8.317 | **10.966** | +0.005 (flat) |
+| no_halluc(prose) | -0.812 | **-0.724** | +0.008 (flat) |
+| no_halluc(slots) | 0.116 | 0.186 | new metric |
+| f1 | 6.619 | 9.108 | flat (Stage 1 deterministic) |
+| pass_all_pct | 11.7% | 23.2% | -0.6pts |
+
+GPU: mean util 20%, peak mem 36.5/80GB (LMFE prefix_fn is CPU-bound; not GPU-bound).
+
+**Reading**: slot enforcement is a no-op on E18. The model picks `null` for most slots (slot mean=0.186) because it was never trained to populate them. The schema enforces validity *if* slots are populated; it doesn't force population. Net rendered prose is essentially identical to PR #12's constrained-prompt output, hence the flat result.
+
+**Confirms the smoke** (n=20 saw the same shape: slots≈0.20, marginal lift). The mechanism is correct — the model just isn't trained to use it.
+
+![cross-experiment progression](../../../../experiments/progress/dd_explainer_two_stage/v2_progression.png)
+
+## Pivot to PR-C — Stage 2 GRPO retrain on the new schema
+
+The bottleneck isn't the schema or the rubric; it's that E18 doesn't know to populate slots. Stage 2 GRPO with `reward_no_hallucinated_facts_slots` in the reward bundle should converge to a policy that always populates the slot fields with valid values. Once slots are populated, LMFE enforcement is mechanical and `no_halluc_prose` should clear -0.5.
+
+Sweep recipe at `configs/schedules/v2_slot_grounded.yaml`. PR-C branches off PR-B.
 
 ## What this PR ships (PR-A)
 
