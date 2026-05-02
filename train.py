@@ -82,6 +82,7 @@ from dd_explainer_rewards import (  # noqa: E402
     parse_response,
     reward_no_hallucinated_facts,
     reward_no_hallucinated_facts_granular,
+    reward_no_hallucinated_facts_slots,
     score_completion,
 )
 import time  # noqa: E402
@@ -803,6 +804,13 @@ def train(
              "partial credit, range [-1,+1]). Granular gives within-group gradient "
              "when most generations hallucinate.",
     ),
+    slot_reward_weight: float = typer.Option(
+        0.0,
+        help="PR-C: weight on `reward_no_hallucinated_facts_slots` (slot-grounded). "
+             "0.0 disables (default). >0 appends the slot reward to REWARD_FUNCS so "
+             "GRPO has gradient signal toward populating `tariff_cited` and "
+             "`rate_change_pct_cited` slots with valid values.",
+    ),
 ) -> None:
     """Run GRPO training with the 7 verifiable rewards from dd_explainer_rewards."""
     # 1. Load Hydra YAML → typed Settings.
@@ -963,6 +971,25 @@ def train(
             typer.echo(f"[train] no_halluc reward: mode={no_halluc_mode}")
     idx = reward_funcs.index(reward_no_hallucinated_facts)
     reward_funcs[idx] = nh_fn
+
+    # PR-C: opt-in slot reward — adds gradient signal toward populating
+    # `tariff_cited` / `rate_change_pct_cited` slots with valid values.
+    # E18 picks `null` for slots because it was never trained on them; this
+    # reward function gives positive signal for valid slot population and
+    # NO_HALLUC_FAIL for invalid. Without this, the model has no incentive
+    # to use the new fields even though the schema permits them.
+    if slot_reward_weight > 0.0:
+        if slot_reward_weight != 1.0:
+            base_slot_fn = reward_no_hallucinated_facts_slots
+
+            def _weighted_slot(*args, **kwargs):
+                return [slot_reward_weight * s for s in base_slot_fn(*args, **kwargs)]
+            _weighted_slot.__name__ = "reward_no_hallucinated_facts_slots"
+            slot_fn = _weighted_slot
+        else:
+            slot_fn = reward_no_hallucinated_facts_slots
+        reward_funcs.append(slot_fn)
+        typer.echo(f"[train] slot reward enabled: ×{slot_reward_weight}")
 
     trainer = GRPOTrainer(
         model=model,

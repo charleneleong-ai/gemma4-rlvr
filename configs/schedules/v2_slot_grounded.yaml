@@ -1,0 +1,87 @@
+# PR-C: Stage 2 GRPO retrain on the slot-grounded schema.
+#
+# PR-A added structured `tariff_cited` / `rate_change_pct_cited` slots and
+# the prompt template instructing the model to populate them.
+# PR-B added LMFE token-mask enforcement at inference time but the n=1000
+# verdict was flat (mean_total=10.966 vs PR #12 10.961, no_halluc=-0.724
+# vs -0.732) because E18 picks `null` for slots — it was never trained
+# to populate them.
+#
+# This sweep adds `reward_no_hallucinated_facts_slots` to REWARD_FUNCS
+# (via --slot-reward-weight) so GRPO gets gradient signal toward
+# populating slots with valid values. We bracket two weights to find the
+# sweet spot, plus one fresh-from-base reset to test whether starting
+# from E18 or starting clean works better with the new reward.
+#
+# Falsification thresholds (n=100 regression eval):
+#   no_halluc(slots) > 0.5  → slots being populated, train more iters
+#   no_halluc(prose) ≥ -0.5 → ship as new champion
+#   no_halluc(prose) ≥ -0.6 → meaningful lift over PR #12 baseline
+#   no_halluc(prose) <= PR-B → slot training didn't help; rethink
+#
+# Comparison anchors (n=1000):
+#   E18 (PR #12 baseline w/ constrain-facts):  mean_total=10.961, no_halluc=-0.732
+#   E18 + LMFE slot mask (PR-B):                mean_total=10.966, no_halluc=-0.724
+#
+# Each iteration ≈ 90 min train + 15 min eval = ~2 h on 80GB A100.
+# Total sweep ~6 h.
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "10"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+  - "--no-halluc-mode"
+  - "granular"
+  - "--no-halluc-weight"
+  - "2.0"
+
+iters:
+  # 1. ANCHOR — slot weight=1.0 on top of E18's existing GRPO setup.
+  #    Resumes from E18, adds slot reward as 8th component.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--lora-path"
+      - "gemma_4_lora/train_v2_80gb/exp_18"
+      - "--slot-reward-weight"
+      - "1.0"
+      - "--max-steps"
+      - "80"
+    description: "E18 → +slot reward ×1.0 (anchor) — does GRPO learn to populate slots?"
+
+  # 2. WEIGHTED slot reward — push gradient harder on slot dimension.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--lora-path"
+      - "gemma_4_lora/train_v2_80gb/exp_18"
+      - "--slot-reward-weight"
+      - "3.0"
+      - "--max-steps"
+      - "80"
+    description: "E18 → +slot reward ×3.0 — bracket on weight axis"
+
+  # 3. FRESH-FROM-BASE — does starting clean with the new reward beat
+  #    continuing from E18's old behavior? E18 was trained without slot
+  #    rewards so it has a strong "emit null" prior; fresh start may
+  #    converge faster.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--slot-reward-weight"
+      - "2.0"
+      - "--max-steps"
+      - "120"
+      - "--patience"
+      - "15"
+    description: "Fresh from base + slot ×2.0 (no E18 init) — does the prior matter?"
