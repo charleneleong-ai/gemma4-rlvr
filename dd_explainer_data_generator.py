@@ -211,6 +211,12 @@ class TriggerExplanation(BaseModel):
     trigger: Trigger
     header: str
     explanation: str
+    # Optional structured slots — when populated, the rubric validates these
+    # directly against the allowed-list from input_json instead of regex-scanning
+    # prose. Old-format completions (slots absent) fall back to legacy prose
+    # regex so PR #12 baselines remain comparable.
+    tariff_cited: Optional[str] = None
+    rate_change_pct_cited: Optional[float] = None
 
 
 class DirectDebitExplainerResponse(BaseModel):
@@ -313,7 +319,9 @@ Be sympathetic, especially in the case of missed payments. When the amount they 
 </instructions>
 
 Return JSON matching:
-{{"explanations": [{{"trigger": "<one of: Manual reduction | Exemption Expiry | Change in usage | Change in unit rates | Missed/bounced DD payments | First DD review since account start | No triggers identified>", "header": "<5-word header>", "explanation": "<3 sentences>"}}]}}
+{{"explanations": [{{"trigger": "<one of: Manual reduction | Exemption Expiry | Change in usage | Change in unit rates | Missed/bounced DD payments | First DD review since account start | No triggers identified>", "header": "<5-word header>", "tariff_cited": "<verbatim tariff_name from contract_history, or null if you don't reference a tariff>", "rate_change_pct_cited": "<verbatim change_since_previous_rate_percent number from contract_rates_history, or null if you don't reference a rate change>", "explanation": "<3 sentences; reference the cited tariff and rate as {{tariff_cited}} and {{rate_change_pct_cited}} placeholders so they substitute the slot values exactly>"}}]}}
+
+The `tariff_cited` and `rate_change_pct_cited` fields are optional but strongly preferred when your explanation references a specific tariff name or rate change percentage. They MUST come verbatim from the input account_context — pulling them into structured slots prevents fabrication. Use the `{{tariff_cited}}` / `{{rate_change_pct_cited}}` placeholders inside the explanation prose so the rendered output is grounded in the slot values.
 """
 
 

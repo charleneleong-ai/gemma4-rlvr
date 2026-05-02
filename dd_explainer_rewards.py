@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-04-26-soften-well-formed"
+RUBRIC_VERSION = "2026-05-02-slot-grounded"
 
 # Reverted to the uncapped rubric (matching E1 champion) for the data-regen
 # experiment. Rationale: E14 showed that capping the no_halluc penalty makes
@@ -73,10 +73,29 @@ def parse_response(text: str) -> Optional[DirectDebitExplainerResponse]:
         return None
 
 
+def _render_explanation(e) -> str:
+    """Substitute structured slot values into `{tariff_cited}`/`{rate_change_pct_cited}`
+    placeholders in the explanation prose. Old-format completions (slots None)
+    pass through unchanged.
+
+    The user-visible prose IS the rendered string — slot enforcement only
+    helps no_halluc if the rendered output actually contains the valid slot
+    value, so this is what the regex rubric scans.
+    """
+    text = f"{e.header} {e.explanation}"
+    if getattr(e, "tariff_cited", None):
+        text = text.replace("{tariff_cited}", e.tariff_cited)
+    rate = getattr(e, "rate_change_pct_cited", None)
+    if rate is not None:
+        # Format with the precision the rubric expects (1 decimal); strip leading "+"
+        text = text.replace("{rate_change_pct_cited}", f"{rate:+.1f}".lstrip("+"))
+    return text
+
+
 def _extract_text(parsed: Optional[DirectDebitExplainerResponse]) -> str:
     if parsed is None:
         return ""
-    return " ".join(f"{e.header} {e.explanation}" for e in parsed.explanations)
+    return " ".join(_render_explanation(e) for e in parsed.explanations)
 
 
 def _f1(pred: set, gt: set) -> float:
@@ -262,6 +281,68 @@ def reward_no_hallucinated_facts_granular(completions, input_json, **kwargs) -> 
     return scores
 
 
+def _allowed_facts(inp: Dict[str, Any]) -> tuple[set, List[float]]:
+    """Pull (tariffs_lower, rate_pcts) from input_json — same shape the rubric validates against."""
+    tariffs = {
+        (ch.get("tariff_name", "") or "").lower()
+        for ch in inp.get("account_context", {}).get("contract_history", []) or []
+    }
+    pcts: List[float] = []
+    for ch in inp.get("account_context", {}).get("contract_history", []) or []:
+        for rh in ch.get("contract_rates_history", []) or []:
+            for rate in rh.get("rates", []) or []:
+                v = rate.get("change_since_previous_rate_percent")
+                if v is not None:
+                    pcts.append(float(v))
+    return tariffs, pcts
+
+
+def reward_no_hallucinated_facts_slots(completions, input_json, **kwargs) -> List[float]:
+    """Slot-only variant — validates `tariff_cited` / `rate_change_pct_cited` slot
+    fields directly against the input_json allowed-list. Skips prose regex.
+
+    +1.0 if every populated slot is in the allowed-list.
+    NO_HALLUC_FAIL_SCORE if any slot is invalid.
+    Returns the granular legacy score if NO slot is populated (back-compat path
+    for old-format completions during the migration window).
+
+    Diagnostic intended to live alongside the legacy `reward_no_hallucinated_facts`
+    so we can quantify the gap between "slot validity" and "rendered prose
+    cleanliness" — only the latter is what the user reads, so the latter is
+    the apples-to-apples lift number across experiments.
+    """
+    scores: List[float] = []
+    for c, inp in zip(completions, input_json):
+        parsed = parse_response(c[0]["content"])
+        if parsed is None or not parsed.explanations:
+            scores.append(0.0)
+            continue
+        tariffs, real_pcts = _allowed_facts(inp)
+        any_slot_populated = False
+        invalid = False
+        for e in parsed.explanations:
+            if e.tariff_cited:
+                any_slot_populated = True
+                cited = e.tariff_cited.strip().lower()
+                if not any(cited in t or t in cited for t in tariffs if t):
+                    invalid = True
+                    break
+            if e.rate_change_pct_cited is not None:
+                any_slot_populated = True
+                cited_pct = float(e.rate_change_pct_cited)
+                if abs(cited_pct) >= 1.0 and not any(
+                    abs(cited_pct - rp) <= 0.5 for rp in real_pcts
+                ):
+                    invalid = True
+                    break
+        if not any_slot_populated:
+            # Old-format completion — defer to granular prose-regex score
+            scores.append(reward_no_hallucinated_facts_granular([c], [inp])[0])
+            continue
+        scores.append(NO_HALLUC_FAIL_SCORE if invalid else 1.0)
+    return scores
+
+
 def reward_underpayment_language_constrained(completions, input_json, **kwargs) -> List[float]:
     """Targets failure category: 'AI uses underpayment language inappropriately'.
     Only allowed when a prior DDChange has
@@ -375,11 +456,12 @@ def score_completion(
     gt = [ground_truth_triggers]
     inp = [input_json]
     return {
-        "schema_valid":          reward_schema_valid(fake)[0],
-        "in_enum":               reward_triggers_in_enum(fake)[0],
-        "f1_triggers":           reward_triggers_match_ground_truth(fake, gt)[0],
-        "prev_amount_correct":   reward_previous_dd_amount_correct(fake, inp)[0],
-        "no_hallucinated_facts": reward_no_hallucinated_facts(fake, inp)[0],
-        "underpayment_ok":       reward_underpayment_language_constrained(fake, inp)[0],
-        "well_formed":           reward_explanations_well_formed(fake)[0],
+        "schema_valid":               reward_schema_valid(fake)[0],
+        "in_enum":                    reward_triggers_in_enum(fake)[0],
+        "f1_triggers":                reward_triggers_match_ground_truth(fake, gt)[0],
+        "prev_amount_correct":        reward_previous_dd_amount_correct(fake, inp)[0],
+        "no_hallucinated_facts":      reward_no_hallucinated_facts(fake, inp)[0],
+        "no_hallucinated_facts_slots": reward_no_hallucinated_facts_slots(fake, inp)[0],
+        "underpayment_ok":            reward_underpayment_language_constrained(fake, inp)[0],
+        "well_formed":                reward_explanations_well_formed(fake)[0],
     }
