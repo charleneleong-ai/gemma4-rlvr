@@ -45,9 +45,10 @@ from __future__ import annotations
 import json
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import mean
 from typing import Any, Optional
 
 import typer
@@ -223,9 +224,127 @@ def _print_deltas(
             typer.echo(f"  {label:18s} {vv:>8.3f} -> {tt:>8.3f}   delta={tt - vv:+.3f}")
 
 
+def _per_trigger_leak_summary(
+    per_row_dicts: list[dict[str, Any]],
+    arm_name: str,
+    *,
+    bucket_key: str = "ground_truth_triggers",
+) -> list[dict[str, Any]]:
+    """Bucket per-row scores by trigger, return a list of {trigger, n, fail_pct, no_halluc_mean}.
+
+    `arm_name` selects the arm's scores from each row (looks under r["scores"][arm]
+    for new-format rows or directly under r[arm] for legacy).
+    """
+    buckets: dict[str, list[dict]] = defaultdict(list)
+    for r in per_row_dicts:
+        scores = r.get("scores", {}).get(arm_name) or r.get(arm_name) or {}
+        if not scores:
+            continue
+        for t in r.get(bucket_key) or []:
+            buckets[t].append(scores)
+    summary: list[dict[str, Any]] = []
+    for t, rows in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
+        if not rows:
+            continue
+        nh_vals = [s.get("no_hallucinated_facts", 0.0) for s in rows]
+        n_fail = sum(1 for v in nh_vals if v <= -2.5)
+        summary.append({
+            "trigger": t,
+            "n": len(rows),
+            "fail_pct": 100.0 * n_fail / len(rows),
+            "no_halluc_mean": mean(nh_vals) if nh_vals else 0.0,
+        })
+    return summary
+
+
+def _log_to_wandb(
+    *,
+    wandb_project: str,
+    wandb_run_name: Optional[str],
+    wandb_notes: Optional[str],
+    wandb_tags: list[str],
+    wandb_config: dict[str, Any],
+    arm_aggregates: dict[str, dict],
+    per_row_dicts: Optional[list[dict[str, Any]]] = None,
+    arm_names: Optional[list[str]] = None,
+) -> None:
+    """Push aggregate + per-row + per-trigger leak summary to a W&B run.
+
+    Lazy import keeps wandb optional — the eval script runs fine without it.
+    """
+    import wandb  # noqa: PLC0415
+
+    tags = sorted({RUBRIC_VERSION, "eval", *wandb_tags})
+    run = wandb.init(
+        project=wandb_project,
+        entity="chaleong",
+        name=wandb_run_name,
+        notes=wandb_notes or "",
+        tags=tags,
+        config=wandb_config,
+        reinit=True,
+    )
+    try:
+        for arm_name, agg in arm_aggregates.items():
+            for k, v in agg.items():
+                if isinstance(v, (int, float)):
+                    wandb.run.summary[f"eval/{arm_name}/{k}"] = v
+
+        if per_row_dicts is None or not per_row_dicts:
+            return
+        if arm_names is None:
+            arm_names = sorted(arm_aggregates.keys())
+
+        # 1. Per-row Table (filterable / sortable in the W&B UI)
+        cols = ["i", "gt_triggers", "stage1_triggers"]
+        for a in arm_names:
+            cols += [f"{a}_no_halluc", f"{a}_f1", f"{a}_well_formed", f"{a}_total"]
+        rows: list[list] = []
+        for r in per_row_dicts:
+            row: list = [
+                r.get("i"),
+                ", ".join(r.get("ground_truth_triggers") or []),
+                ", ".join(r.get("stage1_triggers") or []),
+            ]
+            for a in arm_names:
+                s = r.get("scores", {}).get(a) or r.get(a) or {}
+                row += [
+                    s.get("no_hallucinated_facts"),
+                    s.get("f1_triggers"),
+                    s.get("well_formed"),
+                    sum(v for v in s.values() if isinstance(v, (int, float))),
+                ]
+            rows.append(row)
+        wandb.log({"eval/per_row": wandb.Table(columns=cols, data=rows)})
+
+        # 2. Per-trigger leak summary tables (one per arm, both bucket keys)
+        for a in arm_names:
+            for bucket_key, label in (
+                ("ground_truth_triggers", "by_gt"),
+                ("stage1_triggers", "by_stage1"),
+            ):
+                summary = _per_trigger_leak_summary(
+                    per_row_dicts, a, bucket_key=bucket_key,
+                )
+                if not summary:
+                    continue
+                cols = ["trigger", "n", "fail_pct", "no_halluc_mean"]
+                data = [[s["trigger"], s["n"], s["fail_pct"], s["no_halluc_mean"]] for s in summary]
+                wandb.log({
+                    f"eval/per_trigger/{a}/{label}": wandb.Table(columns=cols, data=data),
+                })
+    finally:
+        run.finish()
+
+
 def _rescore_from_per_row(
     per_row_path: Path,
     out: Path,
+    *,
+    wandb_log: bool = False,
+    wandb_project: str = "gemma4-rlvr-eval",
+    wandb_run_name: Optional[str] = None,
+    wandb_notes: Optional[str] = None,
 ) -> None:
     """Re-score cached completions from a previous run under the current rubric."""
     rows = [json.loads(l) for l in per_row_path.read_text().splitlines() if l.strip()]
@@ -267,6 +386,23 @@ def _rescore_from_per_row(
         baseline_arm=arm_names[0],
         target_arm=arm_names[-1],
     )
+
+    if wandb_log:
+        _log_to_wandb(
+            wandb_project=wandb_project,
+            wandb_run_name=wandb_run_name,
+            wandb_notes=wandb_notes,
+            wandb_tags=["rescore"],
+            wandb_config={
+                "rescored_from": str(per_row_path),
+                "n_heldout": n,
+                "rubric_version": RUBRIC_VERSION,
+                "arm_names": arm_names,
+            },
+            arm_aggregates=arm_aggregates,
+            per_row_dicts=rescored_rows,
+            arm_names=arm_names,
+        )
 
 
 @app.command()
@@ -314,10 +450,34 @@ def main(
         help="If set, skip the model and re-score completions from a previous "
              "<out>.per_row.jsonl under the current rubric. Cheap (~10s).",
     ),
+    wandb_log: bool = typer.Option(
+        False,
+        "--wandb-log/--no-wandb-log",
+        help="Push aggregate metrics + per-row + per-trigger leak Tables to W&B "
+             "for filtering/scrubbing. Lazy import — wandb is optional.",
+    ),
+    wandb_project: str = typer.Option(
+        "gemma4-rlvr-eval",
+        help="W&B project for eval runs (separate from the training project).",
+    ),
+    wandb_run_name: Optional[str] = typer.Option(
+        None,
+        help="W&B run name. Default: auto-generated from lora_path basename + timestamp.",
+    ),
+    wandb_notes: Optional[str] = typer.Option(
+        None,
+        help="Free-text notes attached to the W&B run.",
+    ),
 ) -> None:
     """Generate + score (default), or re-score cached completions (--rescore-from)."""
     if rescore_from is not None:
-        _rescore_from_per_row(rescore_from, out)
+        _rescore_from_per_row(
+            rescore_from, out,
+            wandb_log=wandb_log,
+            wandb_project=wandb_project,
+            wandb_run_name=wandb_run_name,
+            wandb_notes=wandb_notes,
+        )
         return
 
     _setup_workspace_env()
@@ -417,22 +577,46 @@ def main(
     typer.echo(f"\nwrote {out}")
     _print_deltas(arm_aggregates, n, baseline_arm="vanilla", target_arm="two_stage")
 
+    per_row_dicts: list[dict[str, Any]] = []
+    if dump_per_row or wandb_log:
+        for i in range(n):
+            per_row_dicts.append({
+                "i": i,
+                "ground_truth_triggers": sorted(heldout_ds[i]["ground_truth_triggers"]),
+                "stage1_triggers": sorted(predicted_triggers[i]),
+                "input_json": heldout_ds[i]["input_json"],
+                "completions": {arm: arm_completions[arm][i] for arm in arm_completions},
+                "scores": {arm: arm_rows[arm][i] for arm in arm_rows},
+                # Back-compat keys for older readers (per_trigger_leak.py etc).
+                "vanilla": arm_rows.get("vanilla", [{}])[i] if "vanilla" in arm_rows else {},
+                "two_stage": arm_rows.get("two_stage", [{}])[i] if "two_stage" in arm_rows else {},
+            })
     if dump_per_row:
         per_row_path = out.with_suffix(".per_row.jsonl")
         with per_row_path.open("w") as fh:
-            for i in range(n):
-                fh.write(json.dumps({
-                    "i": i,
-                    "ground_truth_triggers": sorted(heldout_ds[i]["ground_truth_triggers"]),
-                    "stage1_triggers": sorted(predicted_triggers[i]),
-                    "input_json": heldout_ds[i]["input_json"],
-                    "completions": {arm: arm_completions[arm][i] for arm in arm_completions},
-                    "scores": {arm: arm_rows[arm][i] for arm in arm_rows},
-                    # Back-compat keys for older readers (per_trigger_leak.py etc).
-                    "vanilla": arm_rows.get("vanilla", [{}])[i] if "vanilla" in arm_rows else {},
-                    "two_stage": arm_rows.get("two_stage", [{}])[i] if "two_stage" in arm_rows else {},
-                }, default=str) + "\n")
+            for r in per_row_dicts:
+                fh.write(json.dumps(r, default=str) + "\n")
         typer.echo(f"wrote per-row {per_row_path}")
+
+    if wandb_log:
+        _log_to_wandb(
+            wandb_project=wandb_project,
+            wandb_run_name=wandb_run_name or f"eval_{lora_path.name}_{int(time.time())}",
+            wandb_notes=wandb_notes,
+            wandb_tags=["generate", lora_path.name],
+            wandb_config={
+                "lora_path": str(lora_path),
+                "classifier_path": str(classifier_path),
+                "n_heldout": n,
+                "constrain_facts": constrain_facts,
+                "enforce_slots": enforce_slots,
+                "rubric_version": RUBRIC_VERSION,
+                "arm_names": [arm.name for arm in arms],
+            },
+            arm_aggregates=arm_aggregates,
+            per_row_dicts=per_row_dicts,
+            arm_names=[arm.name for arm in arms],
+        )
 
 
 if __name__ == "__main__":

@@ -79,6 +79,79 @@ def test_rescore_from_per_row(tmp_path: Path) -> None:
             assert k in payload[arm], f"{arm} missing {k}"
 
 
+def test_per_trigger_leak_summary_buckets_correctly() -> None:
+    """Per-trigger summary correctly buckets, counts fails, computes means."""
+    from scripts.two_stage_eval import _per_trigger_leak_summary
+
+    rows = [
+        {  # gt=[A], two_stage no_halluc=+1 (pass)
+            "i": 0,
+            "ground_truth_triggers": ["A"],
+            "stage1_triggers": ["A"],
+            "scores": {"two_stage": {"no_hallucinated_facts": 1.0}},
+        },
+        {  # gt=[A, B], two_stage no_halluc=-3 (fail) — counts under both A and B
+            "i": 1,
+            "ground_truth_triggers": ["A", "B"],
+            "stage1_triggers": ["A", "B"],
+            "scores": {"two_stage": {"no_hallucinated_facts": -3.0}},
+        },
+        {  # gt=[B], two_stage no_halluc=-3 (fail)
+            "i": 2,
+            "ground_truth_triggers": ["B"],
+            "stage1_triggers": ["B"],
+            "scores": {"two_stage": {"no_hallucinated_facts": -3.0}},
+        },
+    ]
+    summary = _per_trigger_leak_summary(rows, "two_stage")
+    by_t = {s["trigger"]: s for s in summary}
+    assert by_t["A"]["n"] == 2  # rows 0 and 1
+    assert by_t["A"]["fail_pct"] == 50.0  # 1 of 2 fails
+    assert by_t["B"]["n"] == 2  # rows 1 and 2
+    assert by_t["B"]["fail_pct"] == 100.0  # both fail
+
+
+def test_per_trigger_leak_summary_legacy_row_format() -> None:
+    """Old per-row dumps put scores at the top level (no `scores` dict)."""
+    from scripts.two_stage_eval import _per_trigger_leak_summary
+
+    rows = [
+        {
+            "i": 0,
+            "ground_truth_triggers": ["A"],
+            "stage1_triggers": ["A"],
+            "two_stage": {"no_hallucinated_facts": 1.0},  # legacy shape
+        },
+    ]
+    summary = _per_trigger_leak_summary(rows, "two_stage")
+    assert summary[0]["trigger"] == "A"
+    assert summary[0]["fail_pct"] == 0.0
+
+
+def test_wandb_log_lazy_import_unused_when_disabled(tmp_path: Path, monkeypatch) -> None:
+    """The `import wandb` inside _log_to_wandb is lazy — disabled callers never hit it."""
+    import sys
+
+    # Pre-emptively block wandb so any accidental top-level import would fail loudly.
+    monkeypatch.setitem(sys.modules, "wandb", None)
+
+    from scripts.two_stage_eval import _rescore_from_per_row
+
+    rows = [{
+        "i": 0,
+        "ground_truth_triggers": ["X"],
+        "stage1_triggers": ["X"],
+        "input_json": {"account_context": {}, "latest_dd_change": {"dd_amount": 100, "dd_amount_change": 0}},
+        "completions": {"vanilla": "{}", "two_stage": "{}"},
+        "scores": {},
+    }]
+    p = tmp_path / "in.per_row.jsonl"
+    p.write_text(json.dumps(rows[0]) + "\n")
+
+    # wandb_log defaults to False → no import attempted → no error
+    _rescore_from_per_row(p, tmp_path / "out.json")
+
+
 def test_rescore_from_legacy_format_errors_clearly(tmp_path: Path) -> None:
     """Old per-row dumps (no `completions` field) raise typer.BadParameter, not silently."""
     import typer
