@@ -108,6 +108,12 @@ def main(
         Path("data/two_stage_eval_v0.json"),
         help="Where to dump the comparison JSON.",
     ),
+    dump_per_row: bool = typer.Option(
+        False,
+        "--dump-per-row/--no-dump-per-row",
+        help="Also dump per-row scores + Stage-1 triggers + ground_truth_triggers "
+             "to <out>.per_row.jsonl for per-trigger leak diagnostics.",
+    ),
 ) -> None:
     """Run the two-stage A/B and dump a comparison JSON."""
     _setup_workspace_env()
@@ -269,6 +275,19 @@ def main(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(out_payload, indent=2, default=str))
     typer.echo(f"\nwrote {out}")
+
+    if dump_per_row:
+        per_row_path = out.with_suffix(".per_row.jsonl")
+        with per_row_path.open("w") as fh:
+            for i in range(n):
+                fh.write(json.dumps({
+                    "i": i,
+                    "ground_truth_triggers": sorted(heldout_ds[i]["ground_truth_triggers"]),
+                    "stage1_triggers": sorted(predicted_triggers[i]),
+                    "vanilla": vanilla_rows[i],
+                    "two_stage": two_stage_rows[i],
+                }, default=str) + "\n")
+        typer.echo(f"wrote per-row {per_row_path}")
 
 
 if __name__ == "__main__":
