@@ -1,7 +1,7 @@
 [project]
 name = "gemma4-rl"
 version = "0.1.0"
-description = "Gemma 4 Reinforcement Learning (GRPO) — Sudoku solving on A100"
+description = "Gemma 4 Reinforcement Learning (GRPO)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
