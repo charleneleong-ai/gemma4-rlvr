@@ -1,101 +1,58 @@
-"""Autonomous overnight research loop for gemma4 GRPO with active triage.
+"""Autonomous overnight research loop for gemma4 GRPO via shared SweepRunner.
 
-This module is **the reusable orchestrator pattern** for this project. New
-ML projects on this branch should build on top of it rather than rolling
-their own sweep loop. The shape:
+The project-specific pieces stay local:
+- schedule loading from `configs/schedules/<name>.yaml`
+- stdout/GPU triage signals
+- child-process row patching for `kill_reason` / `crash_reason`
 
-    schedule.yaml (configs/schedules/<name>.yaml)
-        ├── common_overrides: shared CLI flags applied to every iter
-        └── iters: list of {config, overrides, description}
-              ↓
-    autoresearch.py (this module)
-        ├── runs each iter via subprocess to train.py
-        ├── tails child stdout in real time
-        ├── triage: SIGINT child if signals say "won't recover"
-        ├── GPU watcher: hang / wasted-compute / undersized kills
-        ├── per-iter status BASELINE/KEEP/DISCARD/EARLY_KILL/CRASH
-        └── per-config artefacts:
-              experiments/<task>/<config>/results.jsonl
-              experiments/<task>/<config>/progress.html
-              experiments/progress/<config>/progress.png
-              experiments/<task>/<config>/current_run.json   (sidecar)
-
-Sequentially launches a small sweep of `train.py` invocations. Each child
-auto-logs to `experiments/<task>/<config>/results.jsonl` and refreshes the
-progress plot via train.py's try/finally hook (always — early-stop, SIGINT,
-or unexpected exception).
-
-The loop monitors child stdout in real time and SIGINTs the child when the
-run is clearly non-optimal — so a bad config does not burn the overnight
-budget. SIGINT lets the child's finally hook log a CRASH row instead of
-vanishing silently. Triage is conservative: act only on signals that mean
-the run cannot recover.
-
-Triage thresholds (per-step dict logs from TRL):
-  * mean step_time over last 5 steps > SLOW_MEAN_S → too slow vs target
-  * single step_time > 200s                        → memory/runtime spike
-  * |kl| > 1.0                                     → policy divergence
-  * |loss| > 10                                    → numerical divergence
-  * no reward beat baseline-1 in last 25 steps     → not learning
-
-GPU triage (calibrated to hardware envelope; see constants below):
-  * util <8% for 5min       → hang
-  * util <35% for 15min     → wasted compute
-  * peak_mem <35% for 30min → undersized config (use peak-so-far so eval
-                              spikes can save the run)
-
-Time bounding: every iter also runs with --max-steps 80 + patience=8,
-so even with no triage trigger a run caps at ~80 min.
-
-Usage:
-  python experiments/autoresearch.py --schedule <name>
-  python experiments/autoresearch.py --schedule <name> --max-iters 3
-  python experiments/autoresearch.py --schedule <name> --start-iter 2  # resume
+The generic orchestration now lives in `autoresearch.SweepRunner`.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import typer
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) in sys.path:
+    sys.path.remove(str(SCRIPT_DIR))
+
+from autoresearch import IterPlan, SweepRunner  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
+
+try:
+    from experiments.experiment_progress import DEFAULT_TASK, load_results, plot_progress
+except ImportError:
+    from experiment_progress import DEFAULT_TASK, load_results, plot_progress
+
 PYTHON = ROOT / ".venv" / "bin" / "python"
 TRAIN = ROOT / "train.py"
-TASK = "dd_explainer"
 LOG_PATH_ENV = "AUTORESEARCH_LOG_PATH"
-
-
-def _results_path(config_name: str) -> Path:
-    p = ROOT / "experiments" / TASK / config_name
-    p.mkdir(parents=True, exist_ok=True)
-    return p / "results.jsonl"
-
-
-def _current_path(config_name: str) -> Path:
-    p = ROOT / "experiments" / TASK / config_name
-    p.mkdir(parents=True, exist_ok=True)
-    return p / "current_run.json"
-
 SCHEDULES_DIR = ROOT / "configs" / "schedules"
+
+# ── schedule loading ──────────────────────────────────────────────────
 
 
 def _load_schedule(name: str) -> tuple[list[tuple[str, list[str], str]], list[str]]:
-    """Load a schedule yaml from `configs/schedules/<name>.yaml`.
+    """Load `configs/schedules/<name>.yaml`.
 
-    Returns (iters, common_overrides) where iters is the same shape as the
-    historical hardcoded SCHEDULE: list of (config_name, cli_overrides, description).
+    Returns `(iters, common_overrides)` where each iter is `(config, overrides,
+    description)`.
     """
-    import yaml  # local import — only needed for the autoresearch CLI
+    import yaml  # local import — CLI-only path
+
     path = SCHEDULES_DIR / f"{name}.yaml"
     if not path.exists():
         available = ", ".join(sorted(p.stem for p in SCHEDULES_DIR.glob("*.yaml")))
@@ -107,171 +64,95 @@ def _load_schedule(name: str) -> tuple[list[tuple[str, list[str], str]], list[st
     iters_raw = data.get("iters") or []
     iters: list[tuple[str, list[str], str]] = []
     for entry in iters_raw:
-        iters.append((
-            entry["config"],
-            list(entry.get("overrides") or []),
-            entry["description"],
-        ))
+        iters.append(
+            (
+                entry["config"],
+                list(entry.get("overrides") or []),
+                entry["description"],
+            )
+        )
     return iters, common
 
-# ── Triage thresholds ──────────────────────────────────────────────
-SLOW_WINDOW = 5            # rolling window for step_time check
-SLOW_MEAN_S = 130.0        # mean s/step above this = abandon. Bumped 90→130
-                           # after v2_lr_explore: ng=24 naturally lands ~110-120s,
-                           # 90s killed legitimate higher-group configs at step 5.
-SLOW_SPIKE_S = 200.0       # any single step over this = abandon
-KL_DIVERGE = 1.0           # |kl| above this = policy collapse
-LOSS_DIVERGE = 10.0        # |loss| above this = numerical blow-up
-NO_LEARN_WINDOW = 25       # steps without beating baseline-1 reward = abandon
 
-GPU_LOW_UTIL_PCT  = 8      # % below which GPU counts as idle (hang)
-GPU_LOW_UTIL_S    = 300    # 5 min consecutive idle → hang kill
-GPU_UNDERUTIL_PCT = 35     # % below which GPU counts as wasted (not hung)
-GPU_UNDERUTIL_S   = 900    # 15 min consecutive low-util → wasted-compute kill.
-                           # Longer than typical eval phase (~5-10min on 8192 ctx)
-                           # so we don't kill mid-eval; assumes warmup grace covered.
-GPU_LOW_MEM_PCT   = 35     # peak memory % below which → undersized config.
-                           # Lowered 50→35 after v2_lr_explore: bs=8/ng=16 long-runs
-                           # sit at ~37% peak during 3+ hours of training before
-                           # eval spikes them to 90%+. 35% catches genuinely tiny
-                           # configs (≤30GB on 80GB) without false-killing the
-                           # default v2 stack mid-training.
-GPU_LOW_MEM_S     = 1800   # 30 min without ever hitting threshold → kill.
-                           # Uses peak-so-far so eval spikes can save the run;
-                           # only fires if training never approaches the budget.
-GPU_GRACE_S       = 180    # 3 min startup grace (model loading)
-GPU_POLL_S        = 30     # nvidia-smi poll interval (s)
-GPU_MEM_HEADROOM  = 0.65   # if peak_mem/total < this → suggest bigger batch
-GPU_UTIL_LOW_WARN = 50     # mean util% below this → suggest tuning
+# ── thresholds / parsing ──────────────────────────────────────────────
 
+SLOW_WINDOW = 5
+SLOW_MEAN_S = 130.0
+SLOW_SPIKE_S = 200.0
+KL_DIVERGE = 1.0
+LOSS_DIVERGE = 10.0
+NO_LEARN_WINDOW = 25
+
+GPU_LOW_UTIL_PCT = 8
+GPU_LOW_UTIL_S = 300
+GPU_UNDERUTIL_PCT = 35
+GPU_UNDERUTIL_S = 900
+GPU_LOW_MEM_PCT = 35
+GPU_LOW_MEM_S = 1800
+GPU_GRACE_S = 180
+GPU_POLL_S = 30
+GPU_MEM_HEADROOM = 0.65
+GPU_UTIL_LOW_WARN = 50
+
+_FIELD_RE_CACHE: dict[str, re.Pattern[str]] = {}
+WANDB_RE = re.compile(r"https://wandb\.ai/[\w\-./]+/runs/[\w\-]+")
+_CRASH_PATTERNS: list[tuple[re.Pattern[str], str | Any]] = [
+    (
+        re.compile(r"torch\.OutOfMemoryError|CUDA out of memory|OutOfMemoryError"),
+        "CUDA OOM",
+    ),
+    (
+        re.compile(r"Killed\s*$", re.MULTILINE),
+        "killed by host (likely cgroup OOM)",
+    ),
+    (
+        re.compile(r"AssertionError:?\s*(.*)"),
+        lambda m: f"AssertionError: {m.group(1).strip()[:80]}",
+    ),
+    (
+        re.compile(r"RuntimeError:?\s*(.*)"),
+        lambda m: f"RuntimeError: {m.group(1).strip()[:80]}",
+    ),
+    (
+        re.compile(r"ValueError:?\s*(.*)"),
+        lambda m: f"ValueError: {m.group(1).strip()[:80]}",
+    ),
+    (
+        re.compile(r"FileNotFoundError:?\s*(.*)"),
+        lambda m: f"FileNotFoundError: {m.group(1).strip()[:80]}",
+    ),
+    (
+        re.compile(r"^([A-Z][A-Za-z]+Error):?\s*(.*)", re.MULTILINE),
+        lambda m: f"{m.group(1)}: {m.group(2).strip()[:80]}",
+    ),
+]
 
 
 def _ts() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _results_path(config_name: str) -> Path:
+    p = ROOT / "experiments" / DEFAULT_TASK / config_name
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "results.jsonl"
+
+
+def _autoresearch_log_path() -> str:
+    log_path = os.environ.get(LOG_PATH_ENV, "")
+    if log_path:
+        return log_path
+    logs = sorted((ROOT / "logs").glob("autoresearch_*.log"))
+    return str(logs[-1]) if logs else ""
 
 
 def _baseline_score(config_name: str) -> float:
-    """Best train-reward score among prior KEEP/BASELINE rows for this config.
-
-    Used by the mid-training triage gate (the `no reward > baseline-1` rule
-    in `_run_with_triage`). Triage compares against in-flight train rewards,
-    so this must stay train-reward-scaled — *not* heldout. The KEEP/DISCARD
-    decision uses heldout via `experiment_progress.promotion_score` instead.
-
-    Scoped per-config so triage thresholds don't bleed across presets.
-    """
-    p = _results_path(config_name)
-    if not p.exists():
-        return float("-inf")
-    rows = [json.loads(l) for l in p.read_text().strip().splitlines() if l]
+    rows = load_results(DEFAULT_TASK, config_name=config_name, include_superseded=True)
     kept = [r["score"] for r in rows if r.get("status") in ("KEEP", "BASELINE")]
     return max(kept) if kept else float("-inf")
 
 
-_CRASH_PATTERNS = [
-    (re.compile(r"torch\.OutOfMemoryError|CUDA out of memory|OutOfMemoryError"), "CUDA OOM"),
-    (re.compile(r"Killed\s*$", re.MULTILINE), "killed by host (likely cgroup OOM)"),
-    (re.compile(r"AssertionError:?\s*(.*)"), lambda m: f"AssertionError: {m.group(1).strip()[:80]}"),
-    (re.compile(r"RuntimeError:?\s*(.*)"), lambda m: f"RuntimeError: {m.group(1).strip()[:80]}"),
-    (re.compile(r"ValueError:?\s*(.*)"), lambda m: f"ValueError: {m.group(1).strip()[:80]}"),
-    (re.compile(r"FileNotFoundError:?\s*(.*)"), lambda m: f"FileNotFoundError: {m.group(1).strip()[:80]}"),
-    (re.compile(r"^([A-Z][A-Za-z]+Error):?\s*(.*)", re.MULTILINE),
-     lambda m: f"{m.group(1)}: {m.group(2).strip()[:80]}"),
-]
-
-
-def _crash_reason_from_lines(lines: list[str]) -> str:
-    """Best-effort: scan recent child stdout for a crash cause.
-
-    Looks for OOM markers first (most common on this hardware), then any
-    `*Error:` line. Falls back to the last non-empty line if no pattern hits.
-    """
-    text = "".join(lines[-200:])  # cap memory; tail is where the trace lives
-    for pat, mapper in _CRASH_PATTERNS:
-        m = pat.search(text)
-        if m:
-            return mapper(m) if callable(mapper) else mapper
-    last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
-    return f"unknown: {last[:120]}" if last else "unknown crash"
-
-
-def _patch_last_with_crash_reason(config_name: str, crash_reason: str) -> None:
-    """Add `crash_reason` to the latest results.jsonl row's metrics.
-
-    Called when autoresearch detects a non-zero child exit with no triage
-    kill_reason — the row was already written by train.py's finally hook
-    with status=CRASH but no detected cause.
-    """
-    p = _results_path(config_name)
-    if not p.exists():
-        return
-    lines = p.read_text().splitlines()
-    if not lines:
-        return
-    try:
-        last = json.loads(lines[-1])
-    except json.JSONDecodeError:
-        return
-    if last.get("status") != "CRASH":
-        return
-    last.setdefault("metrics", {})["crash_reason"] = crash_reason
-    lines[-1] = json.dumps(last)
-    p.write_text("\n".join(lines) + "\n")
-    print(f"[{_ts()}] [autoresearch] tagged last CRASH row with crash_reason={crash_reason!r}")
-
-
-def _relabel_last_as_early_kill(config_name: str, kill_reason: str) -> None:
-    """Rewrite the last results.jsonl row from CRASH→EARLY_KILL.
-
-    train.py's finally hook can't distinguish a triage SIGINT from a real
-    crash — it always logs CRASH. Only autoresearch knows the kill was
-    deliberate, so we patch the row here so the chart can colour triaged
-    kills (grey) separately from true crashes (red).
-    """
-    p = _results_path(config_name)
-    if not p.exists():
-        return
-    lines = p.read_text().splitlines()
-    if not lines:
-        return
-    try:
-        last = json.loads(lines[-1])
-    except json.JSONDecodeError:
-        return
-    if last.get("status") != "CRASH":
-        return
-    last["status"] = "EARLY_KILL"
-    last.setdefault("metrics", {})["kill_reason"] = kill_reason
-    desc = last.get("description", "")
-    if desc.startswith("[crash] "):
-        desc = "[early-kill] " + desc[len("[crash] "):]
-    elif not desc.startswith("[early-kill]"):
-        desc = "[early-kill] " + desc
-    last["description"] = desc
-    lines[-1] = json.dumps(last)
-    p.write_text("\n".join(lines) + "\n")
-    print(f"[{_ts()}] [autoresearch] relabelled last row CRASH→EARLY_KILL ({kill_reason})")
-
-
-def _wait_for_train_to_clear(poll_s: int = 30, max_wait_s: int = 600) -> None:
-    start = time.monotonic()
-    while time.monotonic() - start < max_wait_s:
-        out = subprocess.run(["pgrep", "-f", "train.py train"],
-                             capture_output=True, text=True)
-        if not out.stdout.strip():
-            return
-        print(f"[{_ts()}] waiting for prior train.py to exit (pids={out.stdout.split()})")
-        time.sleep(poll_s)
-    print(f"[{_ts()}] WARN: prior train.py still running after {max_wait_s}s; proceeding")
-
-
-# ── Step-line parsing ──────────────────────────────────────────────
-
-_FIELD_RE_CACHE: dict[str, re.Pattern] = {}
-
-
 def _extract(line: str, key: str) -> float | None:
-    """Pull `'<key>': '<float>'` from a TRL step dict line. Returns None if missing."""
     pat = _FIELD_RE_CACHE.get(key)
     if pat is None:
         pat = re.compile(rf"'{re.escape(key)}': '([^']+)'")
@@ -289,16 +170,21 @@ def _is_step_line(line: str) -> bool:
     return "'step_time'" in line and "'reward'" in line
 
 
-
-def _gpu_stats() -> dict | None:
-    """Return {util_pct, mem_used_gb, mem_total_gb} or None on failure."""
+def _gpu_stats() -> dict[str, float] | None:
     try:
-        out = subprocess.check_output(
-            ["nvidia-smi",
-             "--query-gpu=utilization.gpu,memory.used,memory.total",
-             "--format=csv,noheader,nounits"],
-            timeout=10, text=True,
-        ).strip().split("\n")[0]
+        out = (
+            subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                timeout=10,
+                text=True,
+            )
+            .strip()
+            .split("\n")[0]
+        )
         util, used, total = [x.strip() for x in out.split(",")]
         return {
             "util_pct": int(util),
@@ -309,50 +195,54 @@ def _gpu_stats() -> dict | None:
         return None
 
 
-def _gpu_advisor(samples: list[dict], cmd: list[str]) -> None:
-    """Log GPU utilisation summary + optimisation hints after an iter."""
+def _gpu_advisor(samples: list[dict[str, float]], cmd: list[str]) -> None:
     if not samples:
         return
     utils = [s["util_pct"] for s in samples]
-    mems  = [s["mem_used_gb"] for s in samples]
+    mems = [s["mem_used_gb"] for s in samples]
     total = samples[0]["mem_total_gb"]
     mean_util = sum(utils) / len(utils)
-    peak_mem  = max(mems)
+    peak_mem = max(mems)
 
-    print(f"\n[{_ts()}] [gpu_advisor] mean_util={mean_util:.0f}%  "
-          f"peak_mem={peak_mem:.1f}/{total:.0f}GB  "
-          f"({len(samples)} samples over run)", flush=True)
+    print(
+        f"\n[{_ts()}] [gpu_advisor] mean_util={mean_util:.0f}%  "
+        f"peak_mem={peak_mem:.1f}/{total:.0f}GB  "
+        f"({len(samples)} samples over run)",
+        flush=True,
+    )
 
-    hints = []
+    hints: list[str] = []
     if peak_mem / total < GPU_MEM_HEADROOM:
         headroom_gb = total - peak_mem
         hints.append(
-            f"  • Memory underused (peak {peak_mem:.1f}/{total:.0f}GB, "
-            f"{headroom_gb:.0f}GB free) — consider:"
+            "  • Memory underused (peak "
+            f"{peak_mem:.1f}/{total:.0f}GB, {headroom_gb:.0f}GB free) "
+            "— consider:"
         )
-        # Extract current values from cmd for concrete suggestions
-        def _get(flag):
+
+        def _get(flag: str) -> str | None:
             try:
                 return cmd[cmd.index(flag) + 1]
             except (ValueError, IndexError):
                 return None
-        bs   = _get("--batch-size")   or _get("-b")
-        ng   = _get("--num-generations")
-        msl  = _get("--max-seq-length")
+
+        bs = _get("--batch-size") or _get("-b")
+        ng = _get("--num-generations")
+        msl = _get("--max-seq-length")
         if bs:
-            hints.append(f"    batch_size {bs} → {int(bs)*2} (double)")
+            hints.append(f"    batch_size {bs} → {int(bs) * 2}")
         if ng:
-            hints.append(f"    num_generations {ng} → {min(int(ng)*2, 16)}"
-                         f" (keep divisible by batch*grad_accum)")
+            hints.append(
+                f"    num_generations {ng} → {min(int(ng) * 2, 16)} "
+                "(keep divisible by batch*grad_accum)"
+            )
         if msl:
-            hints.append(f"    max_seq_length {msl} → {int(msl)*2} (longer context)")
+            hints.append(f"    max_seq_length {msl} → {int(msl) * 2}")
         if not any([bs, ng, msl]):
             hints.append("    increase batch_size / num_generations / max_seq_length")
 
     if mean_util < GPU_UTIL_LOW_WARN:
-        hints.append(
-            f"  • Compute underused (mean {mean_util:.0f}%) — possible causes:"
-        )
+        hints.append(f"  • Compute underused (mean {mean_util:.0f}%) — possible causes:")
         hints.append("    dataloader CPU bottleneck · eval/preview overhead · small batch")
     elif mean_util >= 85:
         hints.append(f"  • GPU well-utilised (mean {mean_util:.0f}%) ✓")
@@ -361,280 +251,438 @@ def _gpu_advisor(samples: list[dict], cmd: list[str]) -> None:
         print("\n".join(hints), flush=True)
     print(flush=True)
 
-# ── Per-iteration execution with triage ────────────────────────────
 
-def _run_with_triage(cmd: list[str], baseline_score: float, config_name: str = "") -> tuple[int, str | None]:
-    """Run one training subprocess, monitor stdout, SIGINT on triage trigger.
-
-    Returns (exit_code, kill_reason). kill_reason is None if no triage fired.
-    """
-    proc = subprocess.Popen(cmd, cwd=str(ROOT),
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            bufsize=1, text=True)
-    assert proc.stdout is not None
+def _crash_reason_from_lines(lines: list[str]) -> str:
+    text = "".join(lines[-200:])
+    for pat, mapper in _CRASH_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return mapper(m) if callable(mapper) else mapper
+    last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+    return f"unknown: {last[:120]}" if last else "unknown crash"
 
 
-    # ── GPU watcher thread ──────────────────────────────────────────
-    gpu_kill_reason: list[str] = []   # mutable, written by thread
-    gpu_samples:     list[dict] = []  # util/mem snapshots for advisor
-    _gpu_stop = threading.Event()
+def _patch_logged_row(
+    config_name: str,
+    experiment_num: int,
+    *,
+    metrics_update: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    path = _results_path(config_name)
+    if not path.exists():
+        return None
+    lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
+    if not lines:
+        return None
 
-    def _gpu_watcher():
-        _gpu_stop.wait(GPU_GRACE_S)  # wait out model loading
-        low_since: float | None = None       # ≤8%: hang
-        under_since: float | None = None     # ≤35%: wasted compute
-        mem_low_since: float | None = None   # peak <50%: undersized config
-        peak_mem_pct = 0.0                   # max mem% ever seen
-        while not _gpu_stop.is_set() and proc.poll() is None:
-            s = _gpu_stats()
-            if s:
-                gpu_samples.append(s)
-                util = s["util_pct"]
-                mem_pct = s["mem_used_gb"] / s["mem_total_gb"] * 100
-                peak_mem_pct = max(peak_mem_pct, mem_pct)
+    patched_row: dict[str, Any] | None = None
+    for idx in range(len(lines) - 1, -1, -1):
+        row = json.loads(lines[idx])
+        if row.get("experiment") != experiment_num:
+            continue
+        if metrics_update:
+            row.setdefault("metrics", {}).update(metrics_update)
+        lines[idx] = json.dumps(row)
+        patched_row = row
+        break
 
-                # Hang detection (existing) — also counts toward underutil window.
-                if util < GPU_LOW_UTIL_PCT:
-                    if low_since is None:
-                        low_since = time.monotonic()
-                    elif time.monotonic() - low_since >= GPU_LOW_UTIL_S:
-                        gpu_kill_reason.append(
-                            f"GPU util {util}% < {GPU_LOW_UTIL_PCT}% "
-                            f"for {GPU_LOW_UTIL_S // 60}min+ — likely hang"
-                        )
-                        _gpu_stop.set()
-                        break
-                    if under_since is None:
-                        under_since = time.monotonic()
-                # Underutil detection — sustained low (but not hung) compute.
-                elif util < GPU_UNDERUTIL_PCT:
-                    low_since = None
-                    if under_since is None:
-                        under_since = time.monotonic()
-                    elif time.monotonic() - under_since >= GPU_UNDERUTIL_S:
-                        gpu_kill_reason.append(
-                            f"GPU util sustained <{GPU_UNDERUTIL_PCT}% "
-                            f"for {GPU_UNDERUTIL_S // 60}min+ — wasted compute "
-                            f"(last sample {util}%, {s['mem_used_gb']:.0f}/"
-                            f"{s['mem_total_gb']:.0f}GB)"
-                        )
-                        _gpu_stop.set()
-                        break
-                else:
-                    low_since = None
-                    under_since = None
+    if patched_row is None:
+        return None
+    path.write_text("\n".join(lines) + "\n")
+    return patched_row
 
-                # Memory underuse — peak never hit threshold → undersized config.
-                # Eval spikes count: peak_mem_pct is monotonic, so once any
-                # phase hits 50%+, the kill clock stops permanently.
-                if peak_mem_pct < GPU_LOW_MEM_PCT:
-                    if mem_low_since is None:
-                        mem_low_since = time.monotonic()
-                    elif time.monotonic() - mem_low_since >= GPU_LOW_MEM_S:
-                        gpu_kill_reason.append(
-                            f"peak GPU mem {peak_mem_pct:.0f}% < {GPU_LOW_MEM_PCT}% "
-                            f"for {GPU_LOW_MEM_S // 60}min+ — undersized config "
-                            f"({s['mem_used_gb']:.0f}/{s['mem_total_gb']:.0f}GB; "
-                            f"try larger batch / num_generations / max_seq_length)"
-                        )
-                        _gpu_stop.set()
-                        break
-                else:
-                    mem_low_since = None
-            _gpu_stop.wait(GPU_POLL_S)
 
-    _gpu_thread = threading.Thread(target=_gpu_watcher, daemon=True, name="gpu-watcher")
-    _gpu_thread.start()
-    # ────────────────────────────────────────────────────────────────
-    step_times: deque[float] = deque(maxlen=SLOW_WINDOW)
-    recent_rewards: deque[float] = deque(maxlen=NO_LEARN_WINDOW)
-    recent_lines: deque[str] = deque(maxlen=200)
-    n_steps = 0
-    kill_reason: str | None = None
+# ── adapters ──────────────────────────────────────────────────────────
 
-    try:
-        for line in iter(proc.stdout.readline, ""):
+
+class ScheduleIterPlanner:
+    def __init__(
+        self,
+        *,
+        schedule: str,
+        max_iters: int,
+        skip_baseline: bool,
+        start_iter: int,
+    ) -> None:
+        self.schedule = schedule
+        iters_full, self.common_overrides = _load_schedule(schedule)
+        cap = max_iters or len(iters_full)
+        iters = iters_full[:cap]
+        if skip_baseline:
+            iters = iters[1:]
+        if start_iter > 1:
+            iters = iters[start_iter - 1 :]
+        self.iters = iters
+        self.total = len(iters)
+        self.seen_configs = sorted({cfg for cfg, _, _ in iters})
+
+    def plan_iters(self, history: list[dict[str, Any]]):
+        for i, (config, extras, notes) in enumerate(self.iters, start=1):
+            desc = f"[autoresearch {i}/{self.total}] {notes}"
+            cmd = [
+                str(PYTHON),
+                str(TRAIN),
+                "train",
+                "-c",
+                config,
+                "-d",
+                desc,
+                *self.common_overrides,
+                *extras,
+            ]
+            print(f"\n{'=' * 70}\n[{_ts()}] Iter {i}/{self.total}: {config} {' '.join(extras)}")
+            print(
+                f"  baseline_score so far = "
+                f"{_baseline_score(config) if _baseline_score(config) != float('-inf') else 'none'}"
+            )
+            print(f"$ {' '.join(cmd)}\n{'=' * 70}")
+            yield IterPlan(
+                cmd=cmd,
+                description=desc,
+                notes=desc,
+                config_name=config,
+                timeout_min=24 * 60,
+                popen_kwargs={
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.STDOUT,
+                    "bufsize": 1,
+                    "text": True,
+                },
+                sidecar_payload={
+                    "log_path": _autoresearch_log_path(),
+                    "iter_marker": f"Iter {i}/{self.total}",
+                },
+                cwd=ROOT,
+            )
+
+
+class GemmaTriageMonitor:
+    def __init__(self) -> None:
+        self._reset()
+
+    def _reset(self) -> None:
+        self.config_name = ""
+        self.expected_experiment = 0
+        self.baseline_score = float("-inf")
+        self.kill_reason: str | None = None
+        self.wandb_url = ""
+        self.step_times: deque[float] = deque(maxlen=SLOW_WINDOW)
+        self.recent_rewards: deque[float] = deque(maxlen=NO_LEARN_WINDOW)
+        self.recent_lines: deque[str] = deque(maxlen=200)
+        self.n_steps = 0
+        self.gpu_samples: list[dict[str, float]] = []
+        self._stop = threading.Event()
+        self._reader_thread: threading.Thread | None = None
+        self._gpu_thread: threading.Thread | None = None
+        self._proc: subprocess.Popen[str] | None = None
+        self.started_at = 0.0
+        self.last_exit_code = 0
+
+    def _set_kill_reason(self, reason: str) -> None:
+        if self.kill_reason is None:
+            self.kill_reason = reason
+
+    def setup(self, plan: IterPlan, proc: subprocess.Popen[bytes], baseline: float) -> str | None:
+        del baseline
+        self._reset()
+        self.config_name = plan.config_name or ""
+        self.expected_experiment = len(
+            load_results(DEFAULT_TASK, config_name=self.config_name, include_superseded=True)
+        )
+        self.baseline_score = _baseline_score(self.config_name)
+        self._proc = proc  # type: ignore[assignment]
+        self.started_at = time.monotonic()
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop,
+            daemon=True,
+            name="stdout-reader",
+        )
+        self._gpu_thread = threading.Thread(
+            target=self._gpu_loop,
+            daemon=True,
+            name="gpu-watcher",
+        )
+        self._reader_thread.start()
+        self._gpu_thread.start()
+        return None
+
+    def _reader_loop(self) -> None:
+        assert self._proc is not None
+        assert self._proc.stdout is not None
+        for line in iter(self._proc.stdout.readline, ""):
             sys.stdout.write(line)
             sys.stdout.flush()
-            recent_lines.append(line)
+            self.recent_lines.append(line)
+
+            urls = WANDB_RE.findall(line)
+            if urls:
+                self.wandb_url = urls[-1]
 
             if not _is_step_line(line):
                 continue
 
-            n_steps += 1
+            self.n_steps += 1
             st = _extract(line, "step_time")
             rw = _extract(line, "reward")
             kl = _extract(line, "kl")
             loss = _extract(line, "loss")
 
             if st is not None:
-                step_times.append(st)
+                self.step_times.append(st)
                 if st > SLOW_SPIKE_S:
-                    kill_reason = f"step_time spike {st:.1f}s > {SLOW_SPIKE_S}s on step {n_steps}"
-                    break
-                if len(step_times) == SLOW_WINDOW:
-                    mean_st = sum(step_times) / SLOW_WINDOW
+                    self._set_kill_reason(
+                        f"step_time spike {st:.1f}s > {SLOW_SPIKE_S}s on step {self.n_steps}"
+                    )
+                elif len(self.step_times) == SLOW_WINDOW:
+                    mean_st = sum(self.step_times) / SLOW_WINDOW
                     if mean_st > SLOW_MEAN_S:
-                        kill_reason = (f"mean step_time over last {SLOW_WINDOW} = "
-                                       f"{mean_st:.1f}s > {SLOW_MEAN_S}s")
-                        break
+                        self._set_kill_reason(
+                            "mean step_time over last "
+                            f"{SLOW_WINDOW} = {mean_st:.1f}s > {SLOW_MEAN_S}s"
+                        )
 
             if kl is not None and abs(kl) > KL_DIVERGE:
-                kill_reason = f"|kl|={abs(kl):.3f} > {KL_DIVERGE} suggests policy divergence"
-                break
+                self._set_kill_reason(
+                    f"|kl|={abs(kl):.3f} > {KL_DIVERGE} suggests policy divergence"
+                )
 
             if loss is not None and abs(loss) > LOSS_DIVERGE:
-                kill_reason = f"|loss|={abs(loss):.3f} > {LOSS_DIVERGE} suggests divergence"
-                break
-
-            # GPU hang check (set by watcher thread)
-            if gpu_kill_reason:
-                kill_reason = gpu_kill_reason[0]
-                break
+                self._set_kill_reason(
+                    f"|loss|={abs(loss):.3f} > {LOSS_DIVERGE} suggests divergence"
+                )
 
             if rw is not None:
-                recent_rewards.append(rw)
-                if (baseline_score != float("-inf")
-                        and len(recent_rewards) == NO_LEARN_WINDOW
-                        and max(recent_rewards) < baseline_score - 1.0):
-                    kill_reason = (f"no reward > baseline-1 ({baseline_score - 1:.2f}) "
-                                   f"in last {NO_LEARN_WINDOW} steps; max={max(recent_rewards):.2f}")
-                    break
+                self.recent_rewards.append(rw)
+                if (
+                    self.baseline_score != float("-inf")
+                    and len(self.recent_rewards) == NO_LEARN_WINDOW
+                    and max(self.recent_rewards) < self.baseline_score - 1.0
+                ):
+                    self._set_kill_reason(
+                        f"no reward > baseline-1 ({self.baseline_score - 1:.2f}) "
+                        f"in last {NO_LEARN_WINDOW} steps; max={max(self.recent_rewards):.2f}"
+                    )
 
-        if kill_reason:
-            _gpu_stop.set()
-            _gpu_thread.join(timeout=5)
-            _gpu_advisor(gpu_samples, cmd)
-            print(f"\n[{_ts()}] [triage] {kill_reason}")
-            print(f"[{_ts()}] [triage] sending SIGINT — child's finally hook will log a CRASH row")
-            try:
-                proc.send_signal(signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            try:
-                proc.wait(timeout=120)
-            except subprocess.TimeoutExpired:
-                print(f"[{_ts()}] [triage] child not exiting after SIGINT — escalating to SIGTERM")
-                proc.terminate()
-                proc.wait(timeout=30)
-        else:
-            proc.wait()
-        _gpu_stop.set()
-        _gpu_thread.join(timeout=5)
-        _gpu_advisor(gpu_samples, cmd)
-    except KeyboardInterrupt:
-        _gpu_stop.set()
-        print(f"\n[{_ts()}] [autoresearch] interrupted; forwarding SIGINT to child")
-        proc.send_signal(signal.SIGINT)
-        proc.wait()
-        raise
+            if self._stop.is_set():
+                break
 
-    crash_reason: str | None = None
-    if kill_reason is None and proc.returncode not in (0, None):
-        crash_reason = _crash_reason_from_lines(list(recent_lines))
-        print(f"[{_ts()}] [autoresearch] child exited {proc.returncode} — crash_reason: {crash_reason}")
-        _patch_last_with_crash_reason(config_name, crash_reason)
+    def _gpu_loop(self) -> None:
+        assert self._proc is not None
+        self._stop.wait(GPU_GRACE_S)
+        low_since: float | None = None
+        under_since: float | None = None
+        mem_low_since: float | None = None
+        peak_mem_pct = 0.0
 
-    return proc.returncode, kill_reason, crash_reason
+        while not self._stop.is_set() and self._proc.poll() is None:
+            sample = _gpu_stats()
+            if sample:
+                self.gpu_samples.append(sample)
+                util = sample["util_pct"]
+                mem_pct = sample["mem_used_gb"] / sample["mem_total_gb"] * 100
+                peak_mem_pct = max(peak_mem_pct, mem_pct)
+
+                if util < GPU_LOW_UTIL_PCT:
+                    if low_since is None:
+                        low_since = time.monotonic()
+                    elif time.monotonic() - low_since >= GPU_LOW_UTIL_S:
+                        self._set_kill_reason(
+                            f"GPU util {util}% < {GPU_LOW_UTIL_PCT}% "
+                            f"for {GPU_LOW_UTIL_S // 60}min+ — likely hang"
+                        )
+                        self._stop.set()
+                        break
+                    if under_since is None:
+                        under_since = time.monotonic()
+                elif util < GPU_UNDERUTIL_PCT:
+                    low_since = None
+                    if under_since is None:
+                        under_since = time.monotonic()
+                    elif time.monotonic() - under_since >= GPU_UNDERUTIL_S:
+                        self._set_kill_reason(
+                            f"GPU util sustained <{GPU_UNDERUTIL_PCT}% "
+                            f"for {GPU_UNDERUTIL_S // 60}min+ — wasted compute "
+                            f"(last sample {util}%, "
+                            f"{sample['mem_used_gb']:.0f}/{sample['mem_total_gb']:.0f}GB)"
+                        )
+                        self._stop.set()
+                        break
+                else:
+                    low_since = None
+                    under_since = None
+
+                if peak_mem_pct < GPU_LOW_MEM_PCT:
+                    if mem_low_since is None:
+                        mem_low_since = time.monotonic()
+                    elif time.monotonic() - mem_low_since >= GPU_LOW_MEM_S:
+                        self._set_kill_reason(
+                            f"peak GPU mem {peak_mem_pct:.0f}% < {GPU_LOW_MEM_PCT}% "
+                            f"for {GPU_LOW_MEM_S // 60}min+ — undersized config "
+                            f"({sample['mem_used_gb']:.0f}/{sample['mem_total_gb']:.0f}GB; "
+                            "try larger batch / num_generations / max_seq_length)"
+                        )
+                        self._stop.set()
+                        break
+                else:
+                    mem_low_since = None
+            self._stop.wait(GPU_POLL_S)
+
+    def check(self, elapsed_s: float) -> str | None:
+        del elapsed_s
+        return self.kill_reason
+
+    def teardown(self) -> None:
+        self._stop.set()
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=5)
+        if self._gpu_thread is not None:
+            self._gpu_thread.join(timeout=5)
+        if self._proc is not None and self._proc.returncode is not None:
+            self.last_exit_code = self._proc.returncode
+        if self._proc is not None:
+            _gpu_advisor(self.gpu_samples, [str(x) for x in self._proc.args])
+
+    @property
+    def runtime_min(self) -> float:
+        if not self.started_at:
+            return 0.0
+        return (time.monotonic() - self.started_at) / 60.0
+
+    @property
+    def crash_reason(self) -> str | None:
+        if self.kill_reason is not None:
+            return None
+        if self.last_exit_code in (0, None):
+            return None
+        return _crash_reason_from_lines(list(self.recent_lines))
 
 
-# ── Main loop ──────────────────────────────────────────────────────
+class GemmaResultExtractor:
+    def __init__(self, monitor: GemmaTriageMonitor) -> None:
+        self.monitor = monitor
 
-app = typer.Typer(help="Autonomous overnight GRPO research loop with triage.",
-                  add_completion=False)
+    def _logged_row(self, config_name: str) -> dict[str, Any] | None:
+        rows = load_results(DEFAULT_TASK, config_name=config_name, include_superseded=True)
+        for row in reversed(rows):
+            if row.get("experiment") == self.monitor.expected_experiment:
+                return row
+        return rows[-1] if rows else None
+
+    def extract(
+        self,
+        plan: IterPlan,
+        run_id: str | None,
+        exit_code: int,
+    ) -> list[dict[str, Any]]:
+        del run_id
+        config_name = plan.config_name or ""
+        row = self._logged_row(config_name)
+
+        if row is not None:
+            if self.monitor.kill_reason:
+                patched = _patch_logged_row(
+                    config_name,
+                    row.get("experiment", self.monitor.expected_experiment),
+                    metrics_update={"kill_reason": self.monitor.kill_reason},
+                )
+                row = patched or row
+                row = dict(row)
+                row["status"] = "EARLY_KILL"
+            elif exit_code not in (0, None) and self.monitor.crash_reason:
+                patched = _patch_logged_row(
+                    config_name,
+                    row.get("experiment", self.monitor.expected_experiment),
+                    metrics_update={"crash_reason": self.monitor.crash_reason},
+                )
+                row = patched or row
+                row = dict(row)
+            else:
+                row = dict(row)
+            row["_prelogged"] = True
+            return [row]
+
+        metrics: dict[str, Any] = {}
+        status = "DISCARD"
+        if self.monitor.kill_reason:
+            status = "EARLY_KILL"
+            metrics["kill_reason"] = self.monitor.kill_reason
+        elif exit_code not in (0, None):
+            status = "CRASH"
+            if self.monitor.crash_reason:
+                metrics["crash_reason"] = self.monitor.crash_reason
+
+        score = max(self.monitor.recent_rewards) if self.monitor.recent_rewards else 0.0
+        return [
+            {
+                "task": DEFAULT_TASK,
+                "config_name": config_name,
+                "score": score,
+                "metrics": metrics,
+                "steps": self.monitor.n_steps,
+                "runtime_min": self.monitor.runtime_min,
+                "status": status,
+                "description": plan.description,
+                "notes": plan.notes,
+                "wandb_url": self.monitor.wandb_url,
+                "wandb_run_id": "",
+                "wandb_run_name": "",
+            }
+        ]
+
+
+# ── CLI ───────────────────────────────────────────────────────────────
+
+app = typer.Typer(
+    help="Autonomous overnight GRPO research loop with shared SweepRunner.",
+    add_completion=False,
+)
 
 
 @app.command()
 def main(
     schedule: str = typer.Option(
-        "v1_explore", "--schedule",
-        help=f"Schedule name in configs/schedules/<name>.yaml. "
-             f"Available: {sorted(p.stem for p in SCHEDULES_DIR.glob('*.yaml'))}",
+        "v1_explore",
+        "--schedule",
+        help=(
+            "Schedule name in configs/schedules/<name>.yaml. Available: "
+            f"{sorted(p.stem for p in SCHEDULES_DIR.glob('*.yaml'))}"
+        ),
     ),
-    max_iters: int = typer.Option(0, "--max-iters",
-                                  help="Cap the schedule (0 = run all iters)."),
+    max_iters: int = typer.Option(0, "--max-iters", help="Cap the schedule (0 = run all iters)."),
     skip_baseline: bool = typer.Option(False, "--skip-baseline"),
-    start_iter: int = typer.Option(1, "--start-iter", help="1-based iter index to resume from (skip earlier iters)."),
-    pause_s: int = typer.Option(15, "--pause-s",
-                                help="Seconds to wait between runs (lets GPU mem fully free)."),
-):
-    iters_full, common_overrides = _load_schedule(schedule)
-    cap = max_iters or len(iters_full)
-    print(f"[{_ts()}] Autoresearch starting — schedule={schedule!r}, "
-          f"{min(cap, len(iters_full))}/{len(iters_full)} iterations.")
-    _wait_for_train_to_clear()
+    start_iter: int = typer.Option(1, "--start-iter", help="1-based iter index to resume from."),
+    pause_s: int = typer.Option(15, "--pause-s", help="Seconds to wait between runs."),
+) -> None:
+    planner = ScheduleIterPlanner(
+        schedule=schedule,
+        max_iters=max_iters,
+        skip_baseline=skip_baseline,
+        start_iter=start_iter,
+    )
+    print(f"[{_ts()}] Autoresearch starting — schedule={schedule!r}, {planner.total} iterations.")
 
+    monitor = GemmaTriageMonitor()
+    extractor = GemmaResultExtractor(monitor)
     started = time.monotonic()
-    iters = iters_full[:cap]
-    if skip_baseline:
-        iters = iters[1:]
-    if start_iter > 1:
-        skip_n = start_iter - 1
-        print(f"[{_ts()}] Skipping first {skip_n} iter(s) as requested (--start-iter {start_iter}).")
-        iters = iters[skip_n:]
-    total = len(iters)
-
-    for i, (config, extras, notes) in enumerate(iters, start=1):
-        baseline = _baseline_score(config)
-        results_p = _results_path(config)
-        current_p = _current_path(config)
-        desc = f"[autoresearch {i}/{total}] {notes}"
-        cmd = [
-            str(PYTHON), str(TRAIN), "train",
-            "-c", config, "-d", desc,
-            *common_overrides, *extras,
-        ]
-        print(f"\n{'='*70}\n[{_ts()}] Iter {i}/{total}: {config} {' '.join(extras)}")
-        print(f"  baseline_score so far = {baseline if baseline != float('-inf') else 'none'}")
-        print(f"$ {' '.join(cmd)}\n{'='*70}")
-
-        # Sidecar lets plot_progress render the in-flight iter.
-        log_path = os.environ.get(LOG_PATH_ENV, "")
-        if not log_path:
-            logs = sorted((ROOT / "logs").glob("autoresearch_*.log"))
-            log_path = str(logs[-1]) if logs else ""
-        prior_n = sum(1 for _ in results_p.read_text().splitlines() if _.strip()) if results_p.exists() else 0
-        current_p.write_text(json.dumps({
-            "experiment": prior_n,
-            "config_name": config,
-            "description": desc,
-            "notes": desc,
-            "started_at": _ts(),
-            "log_path": log_path,
-            "iter_marker": f"Iter {i}/{total}",
-        }))
-
-        iter_start = time.monotonic()
-        try:
-            ret, kill_reason, crash_reason = _run_with_triage(cmd, baseline, config)
-        except KeyboardInterrupt:
-            print(f"[{_ts()}] [autoresearch] aborted by SIGINT at iter {i}/{total}.")
-            current_p.unlink(missing_ok=True)
-            return
-        if kill_reason:
-            _relabel_last_as_early_kill(config, kill_reason)
-        elif crash_reason:
-            _patch_last_with_crash_reason(config, crash_reason)
-        current_p.unlink(missing_ok=True)
-        mins = (time.monotonic() - iter_start) / 60.0
-        if kill_reason:
-            outcome = f"triaged: {kill_reason}"
-        elif crash_reason:
-            outcome = f"crashed ({ret}): {crash_reason}"
-        else:
-            outcome = f"natural exit ({ret})"
-        print(f"\n[{_ts()}] Iter {i}/{total} finished in {mins:.1f}min — {outcome}")
-
-        time.sleep(pause_s)
+    runner = SweepRunner(
+        tag=DEFAULT_TASK,
+        planner=planner,
+        triage=monitor,
+        extractor=extractor,
+        experiments_dir=ROOT / "experiments",
+        iter_timeout_min=24 * 60,
+        triage_poll_s=1,
+        pause_between_iters_s=pause_s,
+    )
+    result = runner.run()
 
     total_h = (time.monotonic() - started) / 3600.0
-    print(f"\n[{_ts()}] Autoresearch finished — {total} iterations in {total_h:.2f}h.")
-    # Per-config artifacts: list every config touched in this schedule.
-    seen_configs = sorted({cfg for cfg, _, _ in iters})
-    for cfg in seen_configs:
+    print(f"\n[{_ts()}] Autoresearch finished — {result.iterations} iterations in {total_h:.2f}h.")
+    for cfg in planner.seen_configs:
         rp = _results_path(cfg)
         print(f"[{_ts()}] Final results [{cfg}]: {rp}")
         print(f"[{_ts()}] Plot           [{cfg}]: {rp.parent / 'progress.html'}")
+        plot_progress(config_name=cfg)
 
 
 if __name__ == "__main__":
