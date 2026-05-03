@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-05-03-usage-aware-signflip"
+RUBRIC_VERSION = "2026-05-04-prev-amount-slot"
 
 # Reverted to the uncapped rubric (matching E1 champion) for the data-regen
 # experiment. Rationale: E14 showed that capping the no_halluc penalty makes
@@ -74,13 +74,13 @@ def parse_response(text: str) -> Optional[DirectDebitExplainerResponse]:
 
 
 def _render_explanation(e) -> str:
-    """Substitute structured slot values into `{tariff_cited}`/`{rate_change_pct_cited}`
-    placeholders in the explanation prose. Old-format completions (slots None)
-    pass through unchanged.
+    """Substitute structured slot values into `{tariff_cited}` / `{rate_change_pct_cited}` /
+    `{prev_amount_cited}` placeholders in the explanation prose. Old-format
+    completions (slots None) pass through unchanged.
 
     The user-visible prose IS the rendered string — slot enforcement only
-    helps no_halluc if the rendered output actually contains the valid slot
-    value, so this is what the regex rubric scans.
+    helps no_halluc / prev_amount_correct if the rendered output actually
+    contains the valid slot value, so this is what the regex rubric scans.
     """
     text = f"{e.header} {e.explanation}"
     if getattr(e, "tariff_cited", None):
@@ -89,6 +89,13 @@ def _render_explanation(e) -> str:
     if rate is not None:
         # Format with the precision the rubric expects (1 decimal); strip leading "+"
         text = text.replace("{rate_change_pct_cited}", f"{rate:+.1f}".lstrip("+"))
+    prev_amount = getattr(e, "prev_amount_cited", None)
+    if prev_amount is not None:
+        # Format as "£<value>" with up to 2 decimals; the prev_amount rubric
+        # regex expects a "£<num>" pattern preceded by "previous|before|was|
+        # prior|old" cue words, so the placeholder is typically used like
+        # "previous DD was {prev_amount_cited}".
+        text = text.replace("{prev_amount_cited}", f"£{float(prev_amount):.2f}")
     return text
 
 
@@ -173,14 +180,44 @@ _UNDERPAY_RE = re.compile(r"\bunderpa(?:y|id|ying|yment)\b", re.IGNORECASE)
 
 def reward_previous_dd_amount_correct(completions, input_json, **kwargs) -> List[float]:
     """Targets failure category: 'AI incorrectly identifies previous DD amount'.
-    +2.0 if every cited previous-amount matches `latest.dd_amount - latest.dd_amount_change`
-    within £0.01; 0 if none cited; -3.0 if any cited amount is wrong.
+
+    Two paths:
+      - Slot-aware (PR-E, when `prev_amount_cited` is populated): validate the
+        slot value directly against expected = latest.dd_amount - dd_amount_change.
+        +2.0 if within £0.01, -3.0 otherwise. Forces every row to cite (vs the
+        legacy regex which returned 0 for "no citation").
+      - Legacy regex (back-compat for pre-PR-E completions): scan rendered prose
+        for "previous|before|was|prior|old ... £<num>" cues. +2 / 0 / -3 as before.
+
+    Slot path is preferred whenever any explanation populates `prev_amount_cited`.
     """
     scores: List[float] = []
     for c, inp in zip(completions, input_json):
-        text = _extract_text(parse_response(c[0]["content"]))
+        parsed = parse_response(c[0]["content"])
         latest = inp["latest_dd_change"]
-        expected = round(float(latest["dd_amount"]) - float(latest.get("dd_amount_change") or 0.0), 2)
+        expected = round(
+            float(latest["dd_amount"]) - float(latest.get("dd_amount_change") or 0.0),
+            2,
+        )
+
+        any_slot = False
+        slot_invalid = False
+        if parsed is not None:
+            for e in parsed.explanations:
+                slot_val = getattr(e, "prev_amount_cited", None)
+                if slot_val is not None:
+                    any_slot = True
+                    if abs(float(slot_val) - expected) > 0.01:
+                        slot_invalid = True
+                        break
+        if any_slot:
+            scores.append(PREV_AMOUNT_FAIL_SCORE if slot_invalid else 2.0)
+            continue
+
+        # Legacy regex path — pre-PR-E completions or rows where the model
+        # didn't populate the slot (still penalised by zero credit, which is
+        # what motivates the slot in the first place).
+        text = _extract_text(parsed)
         cited = [float(m.group(1)) for m in _PREV_AMOUNT_RE.finditer(text)]
         if not cited:
             scores.append(0.0)
