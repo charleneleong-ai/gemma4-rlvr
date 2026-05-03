@@ -1,0 +1,88 @@
+{
+  "classifier_path": "data/trigger_classifier_v3_extra_features.pt",
+  "lora_path": "gemma_4_lora/train_v2_80gb/exp_27",
+  "n_heldout": 200,
+  "constrain_facts": true,
+  "enforce_slots": true,
+  "stage1_trigger_distribution": {
+    "Manual reduction": 70,
+    "Exemption Expiry": 57,
+    "Missed/bounced DD payments": 71,
+    "Change in unit rates": 80,
+    "First DD review since account start": 50,
+    "Change in usage": 77
+  },
+  "stage1_multi_trigger_rate": 0.62,
+  "vanilla": {
+    "n": 200,
+    "pass_all": 10,
+    "pass_all_pct": 5.0,
+    "pass_thresholds": {
+      "schema_valid": 1.0,
+      "in_enum": 1.0,
+      "f1_triggers": 10.0,
+      "prev_amount_correct": 0.0,
+      "no_hallucinated_facts": 1.0,
+      "underpayment_ok": 0.5,
+      "well_formed": 0.5
+    },
+    "rubric_version": "2026-05-02-slot-grounded",
+    "schema_valid_pass": 194,
+    "schema_valid_mean": 0.91,
+    "in_enum_pass": 194,
+    "in_enum_mean": 0.94,
+    "f1_triggers_pass": 39,
+    "f1_triggers_mean": 4.075,
+    "prev_amount_correct_pass": 3,
+    "prev_amount_correct_mean": 0.015,
+    "no_hallucinated_facts_pass": 114,
+    "no_hallucinated_facts_mean": -0.63,
+    "underpayment_ok_pass": 200,
+    "underpayment_ok_mean": 0.5,
+    "well_formed_pass": 90,
+    "well_formed_mean": 0.049,
+    "mean_total": 5.859,
+    "no_hallucinated_facts_slots_mean": 0.205
+  },
+  "two_stage": {
+    "n": 200,
+    "pass_all": 33,
+    "pass_all_pct": 16.5,
+    "pass_thresholds": {
+      "schema_valid": 1.0,
+      "in_enum": 1.0,
+      "f1_triggers": 10.0,
+      "prev_amount_correct": 0.0,
+      "no_hallucinated_facts": 1.0,
+      "underpayment_ok": 0.5,
+      "well_formed": 0.5
+    },
+    "rubric_version": "2026-05-02-slot-grounded",
+    "schema_valid_pass": 200,
+    "schema_valid_mean": 1.0,
+    "in_enum_pass": 200,
+    "in_enum_mean": 1.0,
+    "f1_triggers_pass": 118,
+    "f1_triggers_mean": 8.589,
+    "prev_amount_correct_pass": 48,
+    "prev_amount_correct_mean": 0.48,
+    "no_hallucinated_facts_pass": 122,
+    "no_hallucinated_facts_mean": -0.56,
+    "underpayment_ok_pass": 200,
+    "underpayment_ok_mean": 0.5,
+    "well_formed_pass": 102,
+    "well_formed_mean": 0.166,
+    "mean_total": 11.175,
+    "no_hallucinated_facts_slots_mean": 0.235
+  },
+  "gpu": {
+    "mean_util_pct": 17.577868852459016,
+    "peak_util_pct": 100,
+    "peak_mem_gb": 36.48,
+    "mem_total_gb": 80.0,
+    "runtime_s": 2480.311686225701,
+    "hints": [
+      "Compute underused (mean 18%) \u2014 possible: dataloader bottleneck / small batch / sequential gen / pipe-bound"
+    ]
+  }
+}
