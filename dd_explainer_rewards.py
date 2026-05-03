@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-05-02-slot-grounded"
+RUBRIC_VERSION = "2026-05-03-usage-aware"
 
 # Reverted to the uncapped rubric (matching E1 champion) for the data-regen
 # experiment. Rationale: E14 showed that capping the no_halluc penalty makes
@@ -191,8 +191,15 @@ def reward_previous_dd_amount_correct(completions, input_json, **kwargs) -> List
 
 def reward_no_hallucinated_facts(completions, input_json, **kwargs) -> List[float]:
     """Targets failure category: 'AI fabricates rate changes / hallucinates tariff names'.
-    Tariff names cited must substring-match a real `contract.tariff_name`; rate %s > 1.0
-    must be within ±0.5 of a real `change_since_previous_rate_percent`.
+
+    Tariff names cited must substring-match a real `contract.tariff_name`. Cited
+    %s with magnitude >= 1.0 must be within +/-0.5 of either a rate-change %
+    (`contract_history.contract_rates_history.rates.change_since_previous_rate_percent`)
+    OR a usage-change % (`projected_consumption_history.<fuel>.change_percent`).
+
+    The usage-aware path (added 2026-05-03) closes the rubric bug that fired on
+    every `Change in usage` row: prose about "your usage went up 12%" was being
+    validated against rate-change %s only, so usage citations always failed.
     """
     scores: List[float] = []
     for c, inp in zip(completions, input_json):
@@ -200,17 +207,7 @@ def reward_no_hallucinated_facts(completions, input_json, **kwargs) -> List[floa
         if not text:
             scores.append(0.0)
             continue
-        tariffs = {
-            (ch.get("tariff_name", "") or "").lower()
-            for ch in inp["account_context"].get("contract_history", []) or []
-        }
-        real_pcts: List[float] = []
-        for ch in inp["account_context"].get("contract_history", []) or []:
-            for rh in ch.get("contract_rates_history", []) or []:
-                for rate in rh.get("rates", []) or []:
-                    v = rate.get("change_since_previous_rate_percent")
-                    if v is not None:
-                        real_pcts.append(float(v))
+        tariffs, real_pcts = _allowed_facts(inp)
 
         score = 1.0
         for m in _TARIFF_RE.finditer(text):
@@ -242,6 +239,9 @@ def reward_no_hallucinated_facts_granular(completions, input_json, **kwargs) -> 
     Granular score = -1.0 + 2.0 × (n_valid / n_total). Range [-1, +1], smooth
     between the extremes. "No citations" returns +1 (full credit, no
     hallucination opportunity). Empty completion returns 0.
+
+    Like the binary variant, the allowed-% list combines rate-change %s and
+    consumption-change %s (usage-aware rubric, 2026-05-03).
     """
     scores: List[float] = []
     for c, inp in zip(completions, input_json):
@@ -249,17 +249,7 @@ def reward_no_hallucinated_facts_granular(completions, input_json, **kwargs) -> 
         if not text:
             scores.append(0.0)
             continue
-        tariffs = {
-            (ch.get("tariff_name", "") or "").lower()
-            for ch in inp["account_context"].get("contract_history", []) or []
-        }
-        real_pcts: List[float] = []
-        for ch in inp["account_context"].get("contract_history", []) or []:
-            for rh in ch.get("contract_rates_history", []) or []:
-                for rate in rh.get("rates", []) or []:
-                    v = rate.get("change_since_previous_rate_percent")
-                    if v is not None:
-                        real_pcts.append(float(v))
+        tariffs, real_pcts = _allowed_facts(inp)
 
         cited_tariffs = [m.group(1).strip().lower() for m in _TARIFF_RE.finditer(text)]
         cited_pcts = [
@@ -282,18 +272,37 @@ def reward_no_hallucinated_facts_granular(completions, input_json, **kwargs) -> 
 
 
 def _allowed_facts(inp: Dict[str, Any]) -> tuple[set, List[float]]:
-    """Pull (tariffs_lower, rate_pcts) from input_json — same shape the rubric validates against."""
+    """Pull (tariffs_lower, allowed_pcts) from input_json.
+
+    `allowed_pcts` combines:
+      - rate-change %s from contract_history.contract_rates_history.rates
+      - consumption-change %s from projected_consumption_history.<fuel>.change_percent
+
+    The usage path (added 2026-05-03) makes the rubric accept legitimate usage
+    citations like "your usage went up 12%" on `Change in usage` rows; without
+    it, every cited usage % was validated against rate-change %s only and
+    hallucination-failed by construction.
+    """
+    ac = inp.get("account_context", {}) or {}
     tariffs = {
         (ch.get("tariff_name", "") or "").lower()
-        for ch in inp.get("account_context", {}).get("contract_history", []) or []
+        for ch in ac.get("contract_history", []) or []
     }
     pcts: List[float] = []
-    for ch in inp.get("account_context", {}).get("contract_history", []) or []:
+    for ch in ac.get("contract_history", []) or []:
         for rh in ch.get("contract_rates_history", []) or []:
             for rate in rh.get("rates", []) or []:
                 v = rate.get("change_since_previous_rate_percent")
                 if v is not None:
                     pcts.append(float(v))
+    pch = ac.get("projected_consumption_history") or {}
+    if isinstance(pch, dict):
+        for fuel_data in pch.values():
+            if not isinstance(fuel_data, dict):
+                continue
+            v = fuel_data.get("change_percent")
+            if v is not None:
+                pcts.append(float(v))
     return tariffs, pcts
 
 
