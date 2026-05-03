@@ -1,25 +1,43 @@
-"""Two-stage A/B evaluation — E18 vanilla vs E18 + Stage-1-injected prompt.
+"""Eval harness for the dd_explainer task — A/B (or N-way) on a held-out split.
 
-Generates completions twice on the same heldout (same seed, same Gemma adapter):
+Each `EvalArm` is one decoding configuration:
 
-  vanilla: build_chat_messages(pin)  -> Gemma -> completion
-  twostage: build_two_stage_prompt(build_chat_messages(pin), Stage1.predict_triggers)
-            -> Gemma -> completion
+  use_stage1       inject Stage-1 classifier triggers into the prompt
+  constrain_facts  inject the prompt-time allowed-facts list (PR #12)
+  use_lmfe         wrap generation with the LMFE token-mask (PR-B)
 
-Scores both with the existing rubric. The two-stage variant should score
-higher on `f1_triggers` (Stage 1 hit rubric=8.77 vs E18's 7.745) and at
-least as high on `no_halluc` / `well_formed` since the LLM now has a
-simpler job (fill in prose only).
+Default arms (today's behaviour preserved):
+
+  vanilla   = EvalArm("vanilla",   use_stage1=False, constrain_facts=False, use_lmfe=False)
+  two_stage = EvalArm("two_stage", use_stage1=True,  constrain_facts=cf,    use_lmfe=es)
+
+Two modes:
+
+  GENERATE (default): load the model, run each arm, score, write an aggregate
+                      JSON. With --dump-per-row also writes <out>.per_row.jsonl
+                      with completions + scores so a future rubric change can
+                      re-score without regenerating.
+
+  RESCORE  (--rescore-from <per_row.jsonl>): skip the model entirely, read the
+                                              cached completions, re-apply the
+                                              current rubric, write a fresh
+                                              aggregate JSON in ~10s.
+
+Heldout sampling is seed-stable (matches the original training split).
 
 Usage:
 
+    # Generate + score (~30min for n=200 with LMFE, ~2.5h for n=1000)
     uv run python scripts/two_stage_eval.py \\
-      --classifier-path data/trigger_classifier_v3_extra_features.pt \\
-      --lora-path gemma_4_lora/train_v2_80gb/exp_18 \\
-      --eval-heldout-n 1000 \\
-      --out data/two_stage_eval_v0.json
+      --lora-path gemma_4_lora/train_v2_80gb/exp_27 \\
+      --eval-heldout-n 200 \\
+      --constrain-facts --enforce-slots --dump-per-row \\
+      --out data/eval_e27_n200.json
 
-Heldout sampling is seed-stable (matches the original training split).
+    # Re-score that run under a new rubric (~10s, no GPU)
+    uv run python scripts/two_stage_eval.py \\
+      --rescore-from data/eval_e27_n200.per_row.jsonl \\
+      --out data/eval_e27_n200_v2rubric.json
 """
 
 from __future__ import annotations
@@ -27,17 +45,19 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from statistics import mean
+from typing import Any, Optional
 
 import typer
 
-# Reuse the existing eval helpers.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from autoresearch import GPUMonitor  # noqa: E402
 
-from dd_explainer_rewards import score_completion  # noqa: E402
+from dd_explainer_rewards import RUBRIC_VERSION, score_completion  # noqa: E402
 from dd_explainer_two_stage import (  # noqa: E402
     TwoStageClassifier,
     build_two_stage_prompt,
@@ -59,6 +79,24 @@ from train import (  # noqa: E402
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
 
+@dataclass(frozen=True)
+class EvalArm:
+    name: str
+    use_stage1: bool
+    constrain_facts: bool
+    use_lmfe: bool
+
+    def description(self) -> str:
+        if not self.use_stage1:
+            return "vanilla (no Stage-1 injection, no constraints)"
+        bits = ["Stage-1-injected"]
+        if self.constrain_facts:
+            bits.append("VALID FACTS prompt list")
+        if self.use_lmfe:
+            bits.append("LMFE slot mask")
+        return " + ".join(bits)
+
+
 def _format_agg(agg: dict[str, Any]) -> str:
     return (
         f"mean_total={agg.get('mean_total'):.3f}  "
@@ -66,6 +104,305 @@ def _format_agg(agg: dict[str, Any]) -> str:
         f"no_halluc={agg.get('no_hallucinated_facts_mean'):.3f}  "
         f"pass_all={agg.get('pass_all_pct')}%"
     )
+
+
+def _run_arm(
+    arm: EvalArm,
+    *,
+    model,
+    tokenizer,
+    heldout_ds,
+    predicted_triggers: list[list[str]],
+    tokenizer_data,
+    max_completion_length: int,
+    batch_size: int,
+) -> list[str]:
+    """Generate completions for one arm. Returns list of completion strings (length n)."""
+    n = len(heldout_ds)
+    typer.echo(f"\nrunning arm '{arm.name}': {arm.description()}")
+    t0 = time.monotonic()
+    completions: list[str] = []
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        chunk_msgs = []
+        chunk_facts: list[dict] = []
+        for i in range(start, end):
+            base = heldout_ds[i]["prompt"]
+            inp = heldout_ds[i]["input_json"]
+            if arm.use_stage1:
+                facts = extract_valid_facts(inp)
+                chunk_facts.append(facts)
+                constrain_arg = facts if arm.constrain_facts else None
+                msg = build_two_stage_prompt(
+                    base, predicted_triggers[i], valid_facts=constrain_arg,
+                )
+            else:
+                msg = base
+                chunk_facts.append({})
+            chunk_msgs.append(msg)
+        prefix_fn = None
+        if arm.use_lmfe:
+            schemas = [build_slot_enforcement_schema(f) for f in chunk_facts]
+            prefix_fn = build_slot_prefix_fn(tokenizer_data, schemas)
+        t_batch = time.monotonic()
+        completions.extend(
+            _generate_batch(
+                model, tokenizer, chunk_msgs, max_completion_length,
+                prefix_allowed_tokens_fn=prefix_fn,
+            )
+        )
+        elapsed = time.monotonic() - t0
+        rate = end / elapsed if elapsed else 0
+        eta_s = (n - end) / rate if rate else 0
+        typer.echo(
+            f"  {arm.name}: {end}/{n}  "
+            f"(batch took {time.monotonic() - t_batch:.0f}s, "
+            f"rate={rate:.2f} rows/s, ETA={eta_s/60:.1f}min)"
+        )
+    typer.echo(f"  arm '{arm.name}' done in {(time.monotonic() - t0) / 60:.1f}min")
+    return completions
+
+
+def _score_completions(
+    completions: list[str],
+    heldout_ds,
+) -> list[dict[str, float]]:
+    """Apply score_completion across all rows."""
+    rows: list[dict[str, float]] = []
+    for i, c in enumerate(completions):
+        gt = sorted(heldout_ds[i]["ground_truth_triggers"])
+        inp = heldout_ds[i]["input_json"]
+        rows.append(score_completion(c, gt, inp))
+    return rows
+
+
+def _build_payload(
+    *,
+    arm_aggregates: dict[str, dict],
+    n: int,
+    heldout_meta: dict[str, Any],
+    gpu_summary: Optional[dict] = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "rubric_version": RUBRIC_VERSION,
+        "n_heldout": n,
+        **heldout_meta,
+        # Back-compat top-level keys ("vanilla", "two_stage" expected by callers)
+        **arm_aggregates,
+    }
+    if gpu_summary is not None:
+        payload["gpu"] = gpu_summary
+    return payload
+
+
+def _print_deltas(
+    arm_aggregates: dict[str, dict],
+    n: int,
+    *,
+    baseline_arm: str,
+    target_arm: str,
+) -> None:
+    typer.echo(f"\n=== heldout (n={n}) ===")
+    for name, agg in arm_aggregates.items():
+        typer.echo(f"  {name:12s}: {_format_agg(agg)}")
+    if baseline_arm in arm_aggregates and target_arm in arm_aggregates:
+        delta_keys = (
+            ("mean_total", "mean_total"),
+            ("f1", "f1_triggers_mean"),
+            ("no_halluc(prose)", "no_hallucinated_facts_mean"),
+            ("no_halluc(slots)", "no_hallucinated_facts_slots_mean"),
+            ("well_formed", "well_formed_mean"),
+            ("prev_amount", "prev_amount_correct_mean"),
+            ("pass_all_pct", "pass_all_pct"),
+        )
+        v = arm_aggregates[baseline_arm]
+        t = arm_aggregates[target_arm]
+        typer.echo(f"\n=== delta ({target_arm} - {baseline_arm}) ===")
+        for label, key in delta_keys:
+            vv = v.get(key, 0.0)
+            tt = t.get(key, 0.0)
+            typer.echo(f"  {label:18s} {vv:>8.3f} -> {tt:>8.3f}   delta={tt - vv:+.3f}")
+
+
+def _per_trigger_leak_summary(
+    per_row_dicts: list[dict[str, Any]],
+    arm_name: str,
+    *,
+    bucket_key: str = "ground_truth_triggers",
+) -> list[dict[str, Any]]:
+    """Bucket per-row scores by trigger, return a list of {trigger, n, fail_pct, no_halluc_mean}.
+
+    `arm_name` selects the arm's scores from each row (looks under r["scores"][arm]
+    for new-format rows or directly under r[arm] for legacy).
+    """
+    buckets: dict[str, list[dict]] = defaultdict(list)
+    for r in per_row_dicts:
+        scores = r.get("scores", {}).get(arm_name) or r.get(arm_name) or {}
+        if not scores:
+            continue
+        for t in r.get(bucket_key) or []:
+            buckets[t].append(scores)
+    summary: list[dict[str, Any]] = []
+    for t, rows in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
+        if not rows:
+            continue
+        nh_vals = [s.get("no_hallucinated_facts", 0.0) for s in rows]
+        n_fail = sum(1 for v in nh_vals if v <= -2.5)
+        summary.append({
+            "trigger": t,
+            "n": len(rows),
+            "fail_pct": 100.0 * n_fail / len(rows),
+            "no_halluc_mean": mean(nh_vals) if nh_vals else 0.0,
+        })
+    return summary
+
+
+def _log_to_wandb(
+    *,
+    wandb_project: str,
+    wandb_run_name: Optional[str],
+    wandb_notes: Optional[str],
+    wandb_tags: list[str],
+    wandb_config: dict[str, Any],
+    arm_aggregates: dict[str, dict],
+    per_row_dicts: Optional[list[dict[str, Any]]] = None,
+    arm_names: Optional[list[str]] = None,
+) -> None:
+    """Push aggregate + per-row + per-trigger leak summary to a W&B run.
+
+    Lazy import keeps wandb optional — the eval script runs fine without it.
+    """
+    import wandb  # noqa: PLC0415
+
+    tags = sorted({RUBRIC_VERSION, "eval", *wandb_tags})
+    run = wandb.init(
+        project=wandb_project,
+        entity="chaleong",
+        name=wandb_run_name,
+        notes=wandb_notes or "",
+        tags=tags,
+        config=wandb_config,
+        reinit=True,
+    )
+    try:
+        for arm_name, agg in arm_aggregates.items():
+            for k, v in agg.items():
+                if isinstance(v, (int, float)):
+                    wandb.run.summary[f"eval/{arm_name}/{k}"] = v
+
+        if per_row_dicts is None or not per_row_dicts:
+            return
+        if arm_names is None:
+            arm_names = sorted(arm_aggregates.keys())
+
+        # 1. Per-row Table (filterable / sortable in the W&B UI)
+        cols = ["i", "gt_triggers", "stage1_triggers"]
+        for a in arm_names:
+            cols += [f"{a}_no_halluc", f"{a}_f1", f"{a}_well_formed", f"{a}_total"]
+        rows: list[list] = []
+        for r in per_row_dicts:
+            row: list = [
+                r.get("i"),
+                ", ".join(r.get("ground_truth_triggers") or []),
+                ", ".join(r.get("stage1_triggers") or []),
+            ]
+            for a in arm_names:
+                s = r.get("scores", {}).get(a) or r.get(a) or {}
+                row += [
+                    s.get("no_hallucinated_facts"),
+                    s.get("f1_triggers"),
+                    s.get("well_formed"),
+                    sum(v for v in s.values() if isinstance(v, (int, float))),
+                ]
+            rows.append(row)
+        wandb.log({"eval/per_row": wandb.Table(columns=cols, data=rows)})
+
+        # 2. Per-trigger leak summary tables (one per arm, both bucket keys)
+        for a in arm_names:
+            for bucket_key, label in (
+                ("ground_truth_triggers", "by_gt"),
+                ("stage1_triggers", "by_stage1"),
+            ):
+                summary = _per_trigger_leak_summary(
+                    per_row_dicts, a, bucket_key=bucket_key,
+                )
+                if not summary:
+                    continue
+                cols = ["trigger", "n", "fail_pct", "no_halluc_mean"]
+                data = [[s["trigger"], s["n"], s["fail_pct"], s["no_halluc_mean"]] for s in summary]
+                wandb.log({
+                    f"eval/per_trigger/{a}/{label}": wandb.Table(columns=cols, data=data),
+                })
+    finally:
+        run.finish()
+
+
+def _rescore_from_per_row(
+    per_row_path: Path,
+    out: Path,
+    *,
+    wandb_log: bool = False,
+    wandb_project: str = "gemma4-rlvr-eval",
+    wandb_run_name: Optional[str] = None,
+    wandb_notes: Optional[str] = None,
+) -> None:
+    """Re-score cached completions from a previous run under the current rubric."""
+    rows = [json.loads(l) for l in per_row_path.read_text().splitlines() if l.strip()]
+    if not rows:
+        raise typer.BadParameter(f"{per_row_path} is empty")
+    if "completions" not in rows[0]:
+        raise typer.BadParameter(
+            f"{per_row_path} predates --dump-per-row v2; no `completions` field. "
+            "Re-generate with the current script to enable rescore."
+        )
+    arm_names = sorted(rows[0]["completions"].keys())
+    typer.echo(
+        f"rescore mode: {len(rows)} rows × {len(arm_names)} arms ({arm_names}) "
+        f"under rubric {RUBRIC_VERSION}"
+    )
+    arm_aggregates: dict[str, dict] = {}
+    rescored_rows: list[dict[str, Any]] = []
+    for i, r in enumerate(rows):
+        new_scores: dict[str, dict[str, float]] = {}
+        gt = sorted(r["ground_truth_triggers"])
+        inp = r["input_json"]
+        for arm in arm_names:
+            new_scores[arm] = score_completion(r["completions"][arm], gt, inp)
+        rescored_rows.append({**r, "scores": new_scores})
+    for arm in arm_names:
+        arm_aggregates[arm] = _aggregate_scores([r["scores"][arm] for r in rescored_rows])
+
+    n = len(rows)
+    payload = _build_payload(
+        arm_aggregates=arm_aggregates,
+        n=n,
+        heldout_meta={"rescored_from": str(per_row_path)},
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, default=str))
+    typer.echo(f"\nwrote {out}")
+    _print_deltas(
+        arm_aggregates, n,
+        baseline_arm=arm_names[0],
+        target_arm=arm_names[-1],
+    )
+
+    if wandb_log:
+        _log_to_wandb(
+            wandb_project=wandb_project,
+            wandb_run_name=wandb_run_name,
+            wandb_notes=wandb_notes,
+            wandb_tags=["rescore"],
+            wandb_config={
+                "rescored_from": str(per_row_path),
+                "n_heldout": n,
+                "rubric_version": RUBRIC_VERSION,
+                "arm_names": arm_names,
+            },
+            arm_aggregates=arm_aggregates,
+            per_row_dicts=rescored_rows,
+            arm_names=arm_names,
+        )
 
 
 @app.command()
@@ -76,7 +413,7 @@ def main(
     ),
     lora_path: Path = typer.Option(
         Path("gemma_4_lora/train_v2_80gb/exp_18"),
-        help="Path to E18's saved LoRA adapter.",
+        help="Path to a saved Gemma LoRA adapter.",
     ),
     model_name: str = typer.Option("unsloth/gemma-4-E4B-it"),
     data_dir: Path = typer.Option(Path("data")),
@@ -89,33 +426,60 @@ def main(
     constrain_facts: bool = typer.Option(
         False,
         "--constrain-facts/--no-constrain-facts",
-        help="If set, the two-stage pass injects an explicit allowed-list of "
-             "valid tariff names + rate percentages into the prompt. The LLM is "
-             "instructed to cite only from this list — directly attacks the "
-             "no_halluc plateau.",
+        help="Two-stage arm: inject the allowed-facts list into the prompt (PR #12).",
     ),
     enforce_slots: bool = typer.Option(
         False,
         "--enforce-slots/--no-enforce-slots",
-        help="PR-B: token-level mask via lm-format-enforcer constraining "
-             "`tariff_cited` ∈ valid_tariffs and `rate_change_pct_cited` ∈ "
-             "valid_pcts. Forces JSON output to populate slots with valid "
-             "values; rubric substitutes them into prose. Combine with "
-             "--constrain-facts so the model also gets a textual hint of the "
-             "allowed-list.",
+        help="Two-stage arm: token-mask via lm-format-enforcer on `tariff_cited` / "
+             "`rate_change_pct_cited` slots (PR-B).",
     ),
     out: Path = typer.Option(
         Path("data/two_stage_eval_v0.json"),
-        help="Where to dump the comparison JSON.",
+        help="Where to dump the aggregate JSON.",
     ),
     dump_per_row: bool = typer.Option(
         False,
         "--dump-per-row/--no-dump-per-row",
-        help="Also dump per-row scores + Stage-1 triggers + ground_truth_triggers "
-             "to <out>.per_row.jsonl for per-trigger leak diagnostics.",
+        help="Also dump per-row completions + scores to <out>.per_row.jsonl. "
+             "Required to use --rescore-from later.",
+    ),
+    rescore_from: Optional[Path] = typer.Option(
+        None,
+        "--rescore-from",
+        help="If set, skip the model and re-score completions from a previous "
+             "<out>.per_row.jsonl under the current rubric. Cheap (~10s).",
+    ),
+    wandb_log: bool = typer.Option(
+        False,
+        "--wandb-log/--no-wandb-log",
+        help="Push aggregate metrics + per-row + per-trigger leak Tables to W&B "
+             "for filtering/scrubbing. Lazy import — wandb is optional.",
+    ),
+    wandb_project: str = typer.Option(
+        "gemma4-rlvr-eval",
+        help="W&B project for eval runs (separate from the training project).",
+    ),
+    wandb_run_name: Optional[str] = typer.Option(
+        None,
+        help="W&B run name. Default: auto-generated from lora_path basename + timestamp.",
+    ),
+    wandb_notes: Optional[str] = typer.Option(
+        None,
+        help="Free-text notes attached to the W&B run.",
     ),
 ) -> None:
-    """Run the two-stage A/B and dump a comparison JSON."""
+    """Generate + score (default), or re-score cached completions (--rescore-from)."""
+    if rescore_from is not None:
+        _rescore_from_per_row(
+            rescore_from, out,
+            wandb_log=wandb_log,
+            wandb_project=wandb_project,
+            wandb_run_name=wandb_run_name,
+            wandb_notes=wandb_notes,
+        )
+        return
+
     _setup_workspace_env()
 
     typer.echo(f"loading Stage 1 classifier from {classifier_path}…")
@@ -132,7 +496,6 @@ def main(
     gpu_monitor = GPUMonitor()
     gpu_monitor.start()
 
-    # Stage 1 predictions on every heldout row
     typer.echo("running Stage 1 classifier on every heldout row…")
     t0 = time.monotonic()
     predicted_triggers: list[list[str]] = [
@@ -140,9 +503,7 @@ def main(
     ]
     typer.echo(f"  Stage 1 done in {time.monotonic() - t0:.1f}s")
 
-    # Trigger-distribution sanity check
-    from collections import Counter
-    trigger_counter = Counter()
+    trigger_counter: Counter[str] = Counter()
     for triggers in predicted_triggers:
         for t in triggers:
             trigger_counter[t] += 1
@@ -152,29 +513,6 @@ def main(
     multi_count = sum(1 for triggers in predicted_triggers if len(triggers) > 1)
     typer.echo(f"  multi-trigger rows: {multi_count}/{n} ({multi_count / n:.1%})")
 
-    # Vanilla E18 generation
-    typer.echo("\nrunning Gemma E18 vanilla on the full heldout…")
-    t0 = time.monotonic()
-    vanilla_completions: list[str] = []
-    for start in range(0, n, batch_size):
-        chunk = [heldout_ds[i]["prompt"] for i in range(start, min(start + batch_size, n))]
-        vanilla_completions.extend(_generate_batch(model, tokenizer, chunk, max_completion_length))
-        done = min(start + batch_size, n)
-        if done % (batch_size * 4) == 0 or done == n:
-            typer.echo(f"  vanilla generation: {done}/{n}")
-    typer.echo(f"  vanilla done in {(time.monotonic() - t0) / 60:.1f}min")
-
-    # Two-stage generation: same model, modified prompts
-    desc = "Stage-1-injected"
-    if constrain_facts:
-        desc += " + VALID FACTS prompt-time list"
-    if enforce_slots:
-        desc += " + LMFE slot mask"
-    typer.echo(f"\nrunning Gemma E18 with {desc} prompts on the full heldout…")
-
-    # Build the LMFE tokenizer-data table ONCE — it's vocab-independent of
-    # per-row schemas, expensive on Gemma 4's 262k vocab (~20s), and would
-    # otherwise rebuild every batch.
     tokenizer_data = None
     if enforce_slots:
         typer.echo("  building LMFE tokenizer-data table (one-time, ~20s)…")
@@ -182,88 +520,50 @@ def main(
         tokenizer_data = build_tokenizer_data(tokenizer)
         typer.echo(f"  tokenizer-data ready in {time.monotonic() - t_td:.1f}s")
 
-    t0 = time.monotonic()
-    two_stage_completions: list[str] = []
-    for start in range(0, n, batch_size):
-        chunk_msgs = []
-        chunk_facts: list[dict] = []
-        for i in range(start, min(start + batch_size, n)):
-            base = heldout_ds[i]["prompt"]
-            facts = extract_valid_facts(heldout_ds[i]["input_json"])
-            chunk_facts.append(facts)
-            constrain_arg = facts if constrain_facts else None
-            modified = build_two_stage_prompt(base, predicted_triggers[i], valid_facts=constrain_arg)
-            chunk_msgs.append(modified)
-        prefix_fn = None
-        if enforce_slots:
-            schemas = [build_slot_enforcement_schema(f) for f in chunk_facts]
-            prefix_fn = build_slot_prefix_fn(tokenizer_data, schemas)
-        t_batch = time.monotonic()
-        two_stage_completions.extend(
-            _generate_batch(
-                model, tokenizer, chunk_msgs, max_completion_length,
-                prefix_allowed_tokens_fn=prefix_fn,
-            )
+    arms = [
+        EvalArm("vanilla", use_stage1=False, constrain_facts=False, use_lmfe=False),
+        EvalArm(
+            "two_stage",
+            use_stage1=True,
+            constrain_facts=constrain_facts,
+            use_lmfe=enforce_slots,
+        ),
+    ]
+
+    arm_completions: dict[str, list[str]] = {}
+    arm_rows: dict[str, list[dict[str, float]]] = {}
+    arm_aggregates: dict[str, dict] = {}
+    for arm in arms:
+        completions = _run_arm(
+            arm,
+            model=model,
+            tokenizer=tokenizer,
+            heldout_ds=heldout_ds,
+            predicted_triggers=predicted_triggers,
+            tokenizer_data=tokenizer_data,
+            max_completion_length=max_completion_length,
+            batch_size=batch_size,
         )
-        done = min(start + batch_size, n)
-        # Per-batch print so long LMFE-enforced runs are observable
-        # mid-flight; lets us catch hangs before n=1000 finishes.
-        elapsed = time.monotonic() - t0
-        rate = done / elapsed if elapsed else 0
-        eta_s = (n - done) / rate if rate else 0
-        typer.echo(
-            f"  two-stage generation: {done}/{n}  "
-            f"(batch took {time.monotonic() - t_batch:.0f}s, "
-            f"rate={rate:.2f} rows/s, ETA={eta_s/60:.1f}min)"
-        )
-    typer.echo(f"  two-stage done in {(time.monotonic() - t0) / 60:.1f}min")
-
-    # Score both
-    vanilla_rows: list[dict[str, float]] = []
-    two_stage_rows: list[dict[str, float]] = []
-    for i in range(n):
-        gt = sorted(heldout_ds[i]["ground_truth_triggers"])
-        inp = heldout_ds[i]["input_json"]
-        vanilla_rows.append(score_completion(vanilla_completions[i], gt, inp))
-        two_stage_rows.append(score_completion(two_stage_completions[i], gt, inp))
-
-    agg_vanilla = _aggregate_scores(vanilla_rows)
-    agg_two_stage = _aggregate_scores(two_stage_rows)
-
-    typer.echo(f"\n=== heldout (n={n}) — E18 adapter ===")
-    typer.echo(f"  vanilla:    {_format_agg(agg_vanilla)}")
-    typer.echo(f"  two-stage:  {_format_agg(agg_two_stage)}")
-
-    delta_keys = (
-        ("mean_total", "mean_total"),
-        ("f1", "f1_triggers_mean"),
-        ("no_halluc(prose)", "no_hallucinated_facts_mean"),
-        ("no_halluc(slots)", "no_hallucinated_facts_slots_mean"),
-        ("well_formed", "well_formed_mean"),
-        ("prev_amount", "prev_amount_correct_mean"),
-        ("pass_all_pct", "pass_all_pct"),
-    )
-    typer.echo("\n=== delta (two-stage - vanilla) ===")
-    for label, key in delta_keys:
-        v = agg_vanilla.get(key, 0.0)
-        t = agg_two_stage.get(key, 0.0)
-        typer.echo(f"  {label:18s} {v:>8.3f} -> {t:>8.3f}   delta={t - v:+.3f}")
+        arm_completions[arm.name] = completions
+        arm_rows[arm.name] = _score_completions(completions, heldout_ds)
+        arm_aggregates[arm.name] = _aggregate_scores(arm_rows[arm.name])
 
     gpu_monitor.stop()
     gpu_summary = gpu_monitor.summary()
     typer.echo(f"\n=== GPU ===\n  {gpu_monitor.format_summary()}")
 
-    out_payload = {
-        "classifier_path": str(classifier_path),
-        "lora_path": str(lora_path),
-        "n_heldout": n,
-        "constrain_facts": constrain_facts,
-        "enforce_slots": enforce_slots,
-        "stage1_trigger_distribution": dict(trigger_counter),
-        "stage1_multi_trigger_rate": multi_count / n if n else 0.0,
-        "vanilla": agg_vanilla,
-        "two_stage": agg_two_stage,
-        "gpu": {
+    payload = _build_payload(
+        arm_aggregates=arm_aggregates,
+        n=n,
+        heldout_meta={
+            "classifier_path": str(classifier_path),
+            "lora_path": str(lora_path),
+            "constrain_facts": constrain_facts,
+            "enforce_slots": enforce_slots,
+            "stage1_trigger_distribution": dict(trigger_counter),
+            "stage1_multi_trigger_rate": multi_count / n if n else 0.0,
+        },
+        gpu_summary={
             "mean_util_pct": gpu_summary.mean_util_pct,
             "peak_util_pct": gpu_summary.peak_util_pct,
             "peak_mem_gb": gpu_summary.peak_mem_gb,
@@ -271,23 +571,52 @@ def main(
             "runtime_s": gpu_summary.runtime_s,
             "hints": gpu_summary.hints,
         },
-    }
+    )
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(out_payload, indent=2, default=str))
+    out.write_text(json.dumps(payload, indent=2, default=str))
     typer.echo(f"\nwrote {out}")
+    _print_deltas(arm_aggregates, n, baseline_arm="vanilla", target_arm="two_stage")
 
+    per_row_dicts: list[dict[str, Any]] = []
+    if dump_per_row or wandb_log:
+        for i in range(n):
+            per_row_dicts.append({
+                "i": i,
+                "ground_truth_triggers": sorted(heldout_ds[i]["ground_truth_triggers"]),
+                "stage1_triggers": sorted(predicted_triggers[i]),
+                "input_json": heldout_ds[i]["input_json"],
+                "completions": {arm: arm_completions[arm][i] for arm in arm_completions},
+                "scores": {arm: arm_rows[arm][i] for arm in arm_rows},
+                # Back-compat keys for older readers (per_trigger_leak.py etc).
+                "vanilla": arm_rows.get("vanilla", [{}])[i] if "vanilla" in arm_rows else {},
+                "two_stage": arm_rows.get("two_stage", [{}])[i] if "two_stage" in arm_rows else {},
+            })
     if dump_per_row:
         per_row_path = out.with_suffix(".per_row.jsonl")
         with per_row_path.open("w") as fh:
-            for i in range(n):
-                fh.write(json.dumps({
-                    "i": i,
-                    "ground_truth_triggers": sorted(heldout_ds[i]["ground_truth_triggers"]),
-                    "stage1_triggers": sorted(predicted_triggers[i]),
-                    "vanilla": vanilla_rows[i],
-                    "two_stage": two_stage_rows[i],
-                }, default=str) + "\n")
+            for r in per_row_dicts:
+                fh.write(json.dumps(r, default=str) + "\n")
         typer.echo(f"wrote per-row {per_row_path}")
+
+    if wandb_log:
+        _log_to_wandb(
+            wandb_project=wandb_project,
+            wandb_run_name=wandb_run_name or f"eval_{lora_path.name}_{int(time.time())}",
+            wandb_notes=wandb_notes,
+            wandb_tags=["generate", lora_path.name],
+            wandb_config={
+                "lora_path": str(lora_path),
+                "classifier_path": str(classifier_path),
+                "n_heldout": n,
+                "constrain_facts": constrain_facts,
+                "enforce_slots": enforce_slots,
+                "rubric_version": RUBRIC_VERSION,
+                "arm_names": [arm.name for arm in arms],
+            },
+            arm_aggregates=arm_aggregates,
+            per_row_dicts=per_row_dicts,
+            arm_names=[arm.name for arm in arms],
+        )
 
 
 if __name__ == "__main__":

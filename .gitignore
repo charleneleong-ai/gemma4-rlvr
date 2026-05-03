@@ -115,3 +115,7 @@ logs/
 *.bak
 *.bak.*
 data/outlier_head_*.pt
+
+# Per-row eval dumps include raw completions and exceed 500 KB at n>=200.
+# The aggregate JSON is committed; per-row files are local-only and regeneratable.
+data/*.per_row.jsonl
