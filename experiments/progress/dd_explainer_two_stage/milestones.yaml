@@ -1,0 +1,96 @@
+# Cross-experiment progression milestones for the dd_explainer task.
+#
+# Hand-curated. Each entry is one n=1000 A/B verdict copied from a PR
+# description or sweep writeup. To add a new milestone, append to the
+# `milestones:` list and re-render:
+#
+#     uv run python -m autoresearch.compare progression \
+#       -m experiments/progress/dd_explainer_two_stage/milestones.yaml \
+#       --out experiments/progress/dd_explainer_two_stage/v2_progression.png
+
+title: |-
+  dd_explainer two_stage — cross-experiment progression on n=1000 heldout
+  PR-D rubric fix (#16) breaks the plateau: no_halluc -0.724 -> +1.000, mean_total 10.910 -> 12.634
+
+primary_metric: mean_total
+secondary_metric: no_halluc
+threshold: -0.5
+threshold_label: "-0.5 ship-as-champion"
+
+milestones:
+  - label: vanilla
+    description: "Gemma 4 4B base, no fine-tune (vanilla baseline)"
+    metrics:
+      mean_total: 8.354
+      no_halluc: -0.876
+      pass_all_pct: 11.9
+
+  - label: E18
+    description: "v2 GRPO champion (single-stage, no two-stage architecture)"
+    metrics:
+      mean_total: 9.324
+      no_halluc: -0.840
+      pass_all_pct: 18.5
+
+  - label: v0_pipeline
+    description: "Two-stage v3 (bge-small + extra features) + E18 LoRA — first config to clear 10"
+    metrics:
+      mean_total: 10.293
+      no_halluc: -0.876
+      pass_all_pct: 14.4
+
+  - label: E25
+    description: "v3 + GRPO retrain on Stage-1-injected prompts (90 min sweep)"
+    metrics:
+      mean_total: 10.804
+      no_halluc: -0.844
+      pass_all_pct: 12.9
+
+  - label: v4_mlp+E18
+    description: "MLP head Stage 1 + E18 LoRA (no Stage 2 retrain) — ties E25 cheaper"
+    metrics:
+      mean_total: 10.816
+      no_halluc: -0.848
+      pass_all_pct: 22.4
+
+  - label: v1_constrained
+    description: "v4_mlp + E18 + prompt-time GROUNDING CONSTRAINT (PR #12)"
+    metrics:
+      mean_total: 10.961
+      no_halluc: -0.732
+      pass_all_pct: 23.8
+
+  - label: v2_slot
+    description: "v4_mlp + E18 + LMFE slot mask (PR-B) — flat vs PR #12"
+    metrics:
+      mean_total: 10.966
+      no_halluc: -0.724
+      pass_all_pct: 23.2
+
+  - label: "E26 (×3.0)"
+    description: "PR-C iter 1 — slot reward ×3.0 + 80 steps (over-weighted, regressed prose)"
+    metrics:
+      mean_total: 10.801
+      no_halluc: -0.924
+      pass_all_pct: 12.1
+
+  - label: "E27 (×2.0)"
+    description: "PR-C iter 2 — slot reward ×2.0 + 160 steps (new SOTA mean_total, prose recovered)"
+    metrics:
+      mean_total: 11.192
+      no_halluc: -0.744
+      pass_all_pct: 17.0
+
+  - label: "E27 + LMFE"
+    description: "PR-C E27 adapter eval'd with --constrain-facts --enforce-slots — flat with PR-B"
+    metrics:
+      mean_total: 10.910
+      no_halluc: -0.724
+      pass_all_pct: 17.4
+
+  - label: "E27+LMFE (PR-D)"
+    description: "Same E27+LMFE generations rescored under usage-aware-signflip rubric (#16) — plateau broken, 1000/1000 pass"
+    metrics:
+      mean_total: 12.634
+      no_halluc: 1.000
+      pass_all_pct: 19.4

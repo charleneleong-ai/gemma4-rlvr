@@ -82,6 +82,7 @@ from dd_explainer_rewards import (  # noqa: E402
     parse_response,
     reward_no_hallucinated_facts,
     reward_no_hallucinated_facts_granular,
+    reward_no_hallucinated_facts_slots,
     score_completion,
 )
 import time  # noqa: E402
@@ -803,6 +804,13 @@ def train(
              "partial credit, range [-1,+1]). Granular gives within-group gradient "
              "when most generations hallucinate.",
     ),
+    slot_reward_weight: float = typer.Option(
+        0.0,
+        help="PR-C: weight on `reward_no_hallucinated_facts_slots` (slot-grounded). "
+             "0.0 disables (default). >0 appends the slot reward to REWARD_FUNCS so "
+             "GRPO has gradient signal toward populating `tariff_cited` and "
+             "`rate_change_pct_cited` slots with valid values.",
+    ),
 ) -> None:
     """Run GRPO training with the 7 verifiable rewards from dd_explainer_rewards."""
     # 1. Load Hydra YAML → typed Settings.
@@ -964,6 +972,25 @@ def train(
     idx = reward_funcs.index(reward_no_hallucinated_facts)
     reward_funcs[idx] = nh_fn
 
+    # PR-C: opt-in slot reward — adds gradient signal toward populating
+    # `tariff_cited` / `rate_change_pct_cited` slots with valid values.
+    # E18 picks `null` for slots because it was never trained on them; this
+    # reward function gives positive signal for valid slot population and
+    # NO_HALLUC_FAIL for invalid. Without this, the model has no incentive
+    # to use the new fields even though the schema permits them.
+    if slot_reward_weight > 0.0:
+        if slot_reward_weight != 1.0:
+            base_slot_fn = reward_no_hallucinated_facts_slots
+
+            def _weighted_slot(*args, **kwargs):
+                return [slot_reward_weight * s for s in base_slot_fn(*args, **kwargs)]
+            _weighted_slot.__name__ = "reward_no_hallucinated_facts_slots"
+            slot_fn = _weighted_slot
+        else:
+            slot_fn = reward_no_hallucinated_facts_slots
+        reward_funcs.append(slot_fn)
+        typer.echo(f"[train] slot reward enabled: ×{slot_reward_weight}")
+
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
@@ -1117,8 +1144,18 @@ _PASS_ALL_THRESHOLD: dict = {"prev_amount_correct": 0.0}
 
 
 @torch.no_grad()
-def _generate_batch(model, tokenizer, messages_list, max_completion_length: int) -> list[str]:
-    """Batched temp=0 generation. ~5-8x throughput vs single-row on A100."""
+def _generate_batch(
+    model,
+    tokenizer,
+    messages_list,
+    max_completion_length: int,
+    prefix_allowed_tokens_fn=None,
+) -> list[str]:
+    """Batched temp=0 generation. ~5-8x throughput vs single-row on A100.
+
+    `prefix_allowed_tokens_fn` is HF's per-step token-mask callback —
+    `fn(batch_id, input_ids) -> list[int]`. Used by PR-B's slot-enforced
+    decoding (see `dd_explainer_slot_decoder.build_slot_prefix_fn`)."""
     if not messages_list:
         return []
     if tokenizer.pad_token_id is None:
@@ -1131,11 +1168,14 @@ def _generate_batch(model, tokenizer, messages_list, max_completion_length: int)
         text=texts, add_special_tokens=False, return_tensors="pt",
         padding=True, padding_side="left",
     ).to("cuda")
-    out = model.generate(
+    generate_kwargs = dict(
         **enc, max_new_tokens=max_completion_length,
         temperature=0.0, do_sample=False, use_cache=True,
         pad_token_id=tokenizer.pad_token_id,
     )
+    if prefix_allowed_tokens_fn is not None:
+        generate_kwargs["prefix_allowed_tokens_fn"] = prefix_allowed_tokens_fn
+    out = model.generate(**generate_kwargs)
     prompt_len = enc["input_ids"].shape[1]
     return [tokenizer.decode(seq[prompt_len:], skip_special_tokens=True) for seq in out]
 

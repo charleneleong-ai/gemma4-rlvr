@@ -35,11 +35,18 @@ import typer
 # Reuse the existing eval helpers.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from autoresearch import GPUMonitor  # noqa: E402
+
 from dd_explainer_rewards import score_completion  # noqa: E402
 from dd_explainer_two_stage import (  # noqa: E402
     TwoStageClassifier,
     build_two_stage_prompt,
     extract_valid_facts,
+)
+from dd_explainer_slot_decoder import (  # noqa: E402
+    build_slot_enforcement_schema,
+    build_slot_prefix_fn,
+    build_tokenizer_data,
 )
 from train import (  # noqa: E402
     _aggregate_scores,
@@ -87,9 +94,25 @@ def main(
              "instructed to cite only from this list — directly attacks the "
              "no_halluc plateau.",
     ),
+    enforce_slots: bool = typer.Option(
+        False,
+        "--enforce-slots/--no-enforce-slots",
+        help="PR-B: token-level mask via lm-format-enforcer constraining "
+             "`tariff_cited` ∈ valid_tariffs and `rate_change_pct_cited` ∈ "
+             "valid_pcts. Forces JSON output to populate slots with valid "
+             "values; rubric substitutes them into prose. Combine with "
+             "--constrain-facts so the model also gets a textual hint of the "
+             "allowed-list.",
+    ),
     out: Path = typer.Option(
         Path("data/two_stage_eval_v0.json"),
         help="Where to dump the comparison JSON.",
+    ),
+    dump_per_row: bool = typer.Option(
+        False,
+        "--dump-per-row/--no-dump-per-row",
+        help="Also dump per-row scores + Stage-1 triggers + ground_truth_triggers "
+             "to <out>.per_row.jsonl for per-trigger leak diagnostics.",
     ),
 ) -> None:
     """Run the two-stage A/B and dump a comparison JSON."""
@@ -105,6 +128,9 @@ def main(
     _, heldout_ds = _load_dataset(data_dir, heldout_n=eval_heldout_n, seed=seed)
     n = len(heldout_ds)
     typer.echo(f"heldout ready: {n} rows")
+
+    gpu_monitor = GPUMonitor()
+    gpu_monitor.start()
 
     # Stage 1 predictions on every heldout row
     typer.echo("running Stage 1 classifier on every heldout row…")
@@ -139,23 +165,57 @@ def main(
     typer.echo(f"  vanilla done in {(time.monotonic() - t0) / 60:.1f}min")
 
     # Two-stage generation: same model, modified prompts
+    desc = "Stage-1-injected"
     if constrain_facts:
-        typer.echo("\nrunning Gemma E18 with Stage-1 + VALID FACTS allowed-list prompts…")
-    else:
-        typer.echo("\nrunning Gemma E18 with Stage-1-injected prompts on the full heldout…")
+        desc += " + VALID FACTS prompt-time list"
+    if enforce_slots:
+        desc += " + LMFE slot mask"
+    typer.echo(f"\nrunning Gemma E18 with {desc} prompts on the full heldout…")
+
+    # Build the LMFE tokenizer-data table ONCE — it's vocab-independent of
+    # per-row schemas, expensive on Gemma 4's 262k vocab (~20s), and would
+    # otherwise rebuild every batch.
+    tokenizer_data = None
+    if enforce_slots:
+        typer.echo("  building LMFE tokenizer-data table (one-time, ~20s)…")
+        t_td = time.monotonic()
+        tokenizer_data = build_tokenizer_data(tokenizer)
+        typer.echo(f"  tokenizer-data ready in {time.monotonic() - t_td:.1f}s")
+
     t0 = time.monotonic()
     two_stage_completions: list[str] = []
     for start in range(0, n, batch_size):
         chunk_msgs = []
+        chunk_facts: list[dict] = []
         for i in range(start, min(start + batch_size, n)):
             base = heldout_ds[i]["prompt"]
-            facts = extract_valid_facts(heldout_ds[i]["input_json"]) if constrain_facts else None
-            modified = build_two_stage_prompt(base, predicted_triggers[i], valid_facts=facts)
+            facts = extract_valid_facts(heldout_ds[i]["input_json"])
+            chunk_facts.append(facts)
+            constrain_arg = facts if constrain_facts else None
+            modified = build_two_stage_prompt(base, predicted_triggers[i], valid_facts=constrain_arg)
             chunk_msgs.append(modified)
-        two_stage_completions.extend(_generate_batch(model, tokenizer, chunk_msgs, max_completion_length))
+        prefix_fn = None
+        if enforce_slots:
+            schemas = [build_slot_enforcement_schema(f) for f in chunk_facts]
+            prefix_fn = build_slot_prefix_fn(tokenizer_data, schemas)
+        t_batch = time.monotonic()
+        two_stage_completions.extend(
+            _generate_batch(
+                model, tokenizer, chunk_msgs, max_completion_length,
+                prefix_allowed_tokens_fn=prefix_fn,
+            )
+        )
         done = min(start + batch_size, n)
-        if done % (batch_size * 4) == 0 or done == n:
-            typer.echo(f"  two-stage generation: {done}/{n}")
+        # Per-batch print so long LMFE-enforced runs are observable
+        # mid-flight; lets us catch hangs before n=1000 finishes.
+        elapsed = time.monotonic() - t0
+        rate = done / elapsed if elapsed else 0
+        eta_s = (n - done) / rate if rate else 0
+        typer.echo(
+            f"  two-stage generation: {done}/{n}  "
+            f"(batch took {time.monotonic() - t_batch:.0f}s, "
+            f"rate={rate:.2f} rows/s, ETA={eta_s/60:.1f}min)"
+        )
     typer.echo(f"  two-stage done in {(time.monotonic() - t0) / 60:.1f}min")
 
     # Score both
@@ -177,7 +237,8 @@ def main(
     delta_keys = (
         ("mean_total", "mean_total"),
         ("f1", "f1_triggers_mean"),
-        ("no_halluc", "no_hallucinated_facts_mean"),
+        ("no_halluc(prose)", "no_hallucinated_facts_mean"),
+        ("no_halluc(slots)", "no_hallucinated_facts_slots_mean"),
         ("well_formed", "well_formed_mean"),
         ("prev_amount", "prev_amount_correct_mean"),
         ("pass_all_pct", "pass_all_pct"),
@@ -188,18 +249,45 @@ def main(
         t = agg_two_stage.get(key, 0.0)
         typer.echo(f"  {label:18s} {v:>8.3f} -> {t:>8.3f}   delta={t - v:+.3f}")
 
+    gpu_monitor.stop()
+    gpu_summary = gpu_monitor.summary()
+    typer.echo(f"\n=== GPU ===\n  {gpu_monitor.format_summary()}")
+
     out_payload = {
         "classifier_path": str(classifier_path),
         "lora_path": str(lora_path),
         "n_heldout": n,
+        "constrain_facts": constrain_facts,
+        "enforce_slots": enforce_slots,
         "stage1_trigger_distribution": dict(trigger_counter),
         "stage1_multi_trigger_rate": multi_count / n if n else 0.0,
         "vanilla": agg_vanilla,
         "two_stage": agg_two_stage,
+        "gpu": {
+            "mean_util_pct": gpu_summary.mean_util_pct,
+            "peak_util_pct": gpu_summary.peak_util_pct,
+            "peak_mem_gb": gpu_summary.peak_mem_gb,
+            "mem_total_gb": gpu_summary.mem_total_gb,
+            "runtime_s": gpu_summary.runtime_s,
+            "hints": gpu_summary.hints,
+        },
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(out_payload, indent=2, default=str))
     typer.echo(f"\nwrote {out}")
+
+    if dump_per_row:
+        per_row_path = out.with_suffix(".per_row.jsonl")
+        with per_row_path.open("w") as fh:
+            for i in range(n):
+                fh.write(json.dumps({
+                    "i": i,
+                    "ground_truth_triggers": sorted(heldout_ds[i]["ground_truth_triggers"]),
+                    "stage1_triggers": sorted(predicted_triggers[i]),
+                    "vanilla": vanilla_rows[i],
+                    "two_stage": two_stage_rows[i],
+                }, default=str) + "\n")
+        typer.echo(f"wrote per-row {per_row_path}")
 
 
 if __name__ == "__main__":
