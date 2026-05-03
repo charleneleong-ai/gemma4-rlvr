@@ -202,4 +202,68 @@ def test_allowed_facts_no_consumption_history_still_works(input_json):
     from dd_explainer_rewards import _allowed_facts
 
     tariffs, pcts = _allowed_facts(input_json)
-    assert pcts == [12.3]
+    # rate %s only (12.3); abs() variant adds 12.3 again as a duplicate, both pass-through
+    assert 12.3 in pcts
+
+
+@pytest.fixture
+def usage_decrease_input_json():
+    """Row where consumption *decreased* (negative change_percent)."""
+    return {
+        "account_context": {
+            "contract_history": [{
+                "tariff_name": "Simply Fixed",
+                "contract_rates_history": [
+                    {"rates": [{"change_since_previous_rate_percent": 0.0}]}
+                ],
+            }],
+            "projected_consumption_history": {
+                "electricity": {"change_percent": -12.38, "change_kwh": -304.6},
+                "gas": {"change_percent": 0.0, "change_kwh": 0.0},
+            },
+        },
+        "latest_dd_change": {"dd_amount": 100.0, "dd_amount_change": -10.0},
+    }
+
+
+def test_signflip_decrease_cited_as_positive_magnitude_passes(usage_decrease_input_json):
+    """A decrease of -12.38% described as 'decreased by 12.38%' should pass.
+
+    Pre-fix: input -12.38 vs cited +12.38 → |distance| = 24.76 → fail by 24.26.
+    Post-fix: _allowed_facts also includes abs(-12.38) = 12.38 → pass.
+    """
+    c = _completion(
+        trigger="Change in usage",
+        explanation="Your gas usage has decreased by 12.38% this year.",
+    )
+    s = score_completion(c, ["Change in usage"], usage_decrease_input_json)
+    assert s["no_hallucinated_facts"] == 1.0
+
+
+def test_signflip_signed_negative_citation_still_passes(usage_decrease_input_json):
+    """Citing the value with the original negative sign should also pass."""
+    c = _completion(
+        trigger="Change in usage",
+        explanation="Your gas usage change_percent is -12.38%.",
+    )
+    s = score_completion(c, ["Change in usage"], usage_decrease_input_json)
+    assert s["no_hallucinated_facts"] == 1.0
+
+
+def test_signflip_truly_invalid_pct_still_rejected(usage_decrease_input_json):
+    """Numbers that match neither the signed nor abs() form fail."""
+    c = _completion(
+        trigger="Change in usage",
+        explanation="Your usage decreased by 47.3%.",
+    )
+    s = score_completion(c, ["Change in usage"], usage_decrease_input_json)
+    assert s["no_hallucinated_facts"] < 0
+
+
+def test_allowed_facts_includes_abs_for_signed_pcts(usage_decrease_input_json):
+    """The helper exposes both signed and abs forms in its allowed list."""
+    from dd_explainer_rewards import _allowed_facts
+
+    _, pcts = _allowed_facts(usage_decrease_input_json)
+    assert -12.38 in pcts        # original signed value preserved
+    assert 12.38 in pcts          # abs() variant added so prose magnitude validates

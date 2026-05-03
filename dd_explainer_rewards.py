@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-05-03-usage-aware"
+RUBRIC_VERSION = "2026-05-03-usage-aware-signflip"
 
 # Reverted to the uncapped rubric (matching E1 champion) for the data-regen
 # experiment. Rationale: E14 showed that capping the no_halluc penalty makes
@@ -277,11 +277,14 @@ def _allowed_facts(inp: Dict[str, Any]) -> tuple[set, List[float]]:
     `allowed_pcts` combines:
       - rate-change %s from contract_history.contract_rates_history.rates
       - consumption-change %s from projected_consumption_history.<fuel>.change_percent
+      - the absolute value of every signed % above (so prose like
+        "decreased by 12.38%" — verbal direction + positive magnitude —
+        validates against an input stored as -12.38)
 
     The usage path (added 2026-05-03) makes the rubric accept legitimate usage
-    citations like "your usage went up 12%" on `Change in usage` rows; without
-    it, every cited usage % was validated against rate-change %s only and
-    hallucination-failed by construction.
+    citations on `Change in usage` rows. The abs() variant added shortly after
+    closes a sign-flip bug where every Change-in-usage decrease cited as
+    positive prose failed against the negative input value.
     """
     ac = inp.get("account_context", {}) or {}
     tariffs = {
@@ -303,6 +306,9 @@ def _allowed_facts(inp: Dict[str, Any]) -> tuple[set, List[float]]:
             v = fuel_data.get("change_percent")
             if v is not None:
                 pcts.append(float(v))
+    # Accept either sign — prose like "decreased by 12%" cites a positive
+    # magnitude even when the underlying delta is stored as -12.
+    pcts.extend(abs(v) for v in list(pcts) if v != 0)
     return tariffs, pcts
 
 
