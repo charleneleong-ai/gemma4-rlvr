@@ -10,7 +10,7 @@
 
 title: |-
   dd_explainer two_stage — cross-experiment progression on n=1000 heldout
-  PR-C E27 (×2.0) is new SOTA on mean_total but prose plateau didn't break (-0.74 ≈ PR-B -0.72)
+  E27+LMFE flat with PR-B (-0.724); slot training and LMFE are redundant once both are on
 
 primary_metric: mean_total
 secondary_metric: no_halluc
@@ -80,3 +80,10 @@ milestones:
       mean_total: 11.192
       no_halluc: -0.744
       pass_all_pct: 17.0
+
+  - label: "E27 + LMFE"
+    description: "PR-C E27 adapter eval'd with --constrain-facts --enforce-slots — flat with PR-B"
+    metrics:
+      mean_total: 10.910
+      no_halluc: -0.724
+      pass_all_pct: 17.4
