@@ -1,0 +1,87 @@
+# PR-E: prev_amount_cited slot — does slot-aware rubric teach the model to
+# populate the new slot and improve prev_amount_correct scoring?
+#
+# PR-E added `prev_amount_cited` to the schema + prompt template and made
+# `reward_previous_dd_amount_correct` slot-aware: when the model populates
+# the slot, the rubric validates the value directly (±£0.01) instead of
+# regex-scanning prose. This flips the reward from 0 (no citation) to +2
+# (correct slot) or -3 (wrong slot), giving GRPO real gradient signal.
+#
+# The slot is already in the schema, prompt, and core REWARD_FUNCS — no new
+# flag needed. We just retrain with the updated rubric and see if the model
+# learns to populate prev_amount_cited.
+#
+# Setup matches E27 champion: stage1 predictions, granular no_halluc ×2.0,
+# slot reward ×2.0, lr=5e-6, train_v2_80gb config.
+#
+# Comparison anchors (n=100 regression eval):
+#   E27 (v2_slot_grounded ×2.0 champion):  score=18.406
+#   E18 (PR #12 baseline):                 mean_total=10.961, no_halluc=-0.732
+#
+# Falsification thresholds (n=100 regression eval):
+#   prev_amount_correct > 0.5 → slot being populated, keep going
+#   mean_total ≥ E27           → ship as new champion
+#   prev_amount_correct ≈ 0   → model ignoring the slot, rethink
+#
+# Each iteration ≈ 90 min train + 15 min eval = ~2 h on 80GB A100.
+# Total sweep ~6 h.
+
+common_overrides:
+  - "--eval-batch-size"
+  - "32"
+  - "--eval-regression-n"
+  - "100"
+  - "--patience"
+  - "10"
+  - "--plateau-window"
+  - "10"
+  - "--plateau-delta"
+  - "0.05"
+  - "--no-halluc-mode"
+  - "granular"
+  - "--no-halluc-weight"
+  - "2.0"
+  - "--slot-reward-weight"
+  - "2.0"
+  - "--stage1-predictions-path"
+  - "/workspace/gemma4_rl/data/stage1_predictions_v3.json"
+
+iters:
+  # 1. ANCHOR — same config as E27 champion but with prev_amount_cited slot
+  #    active in the rubric. Direct comparison: does the new slot improve
+  #    prev_amount_correct without regressing mean_total?
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--max-steps"
+      - "80"
+    description: "PR-E anchor: stage1 + slot ×2.0 + prev_amount_cited rubric (vs E27 18.406)"
+
+  # 2. LONG-RUN — more steps for the model to learn the new slot pattern.
+  #    The prev_amount slot is novel; the model may need extra iterations to
+  #    shift from "emit null" to "compute dd_amount - dd_amount_change".
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--max-steps"
+      - "160"
+      - "--patience"
+      - "15"
+      - "--plateau-window"
+      - "15"
+    description: "PR-E long-run: stage1 + slot ×2.0 + prev_amount_cited (160 steps)"
+
+  # 3. NO SLOT REWARD — isolate the effect of the prev_amount_cited rubric
+  #    change alone, without the tariff/rate slot reward gradient. If this
+  #    still lifts prev_amount_correct, the slot-aware rubric is sufficient.
+  - config: train_v2_80gb
+    overrides:
+      - "--learning-rate"
+      - "5.0e-6"
+      - "--slot-reward-weight"
+      - "0.0"
+      - "--max-steps"
+      - "80"
+    description: "PR-E ablation: stage1 + NO slot reward + prev_amount_cited rubric only"
