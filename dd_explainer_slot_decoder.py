@@ -65,6 +65,7 @@ def build_slot_enforcement_schema(valid_facts: dict[str, list]) -> dict[str, Any
       - `trigger` ∈ TRIGGER_LABELS (always — eliminates schema-violation rows)
       - `tariff_cited` is null OR ∈ valid_facts["tariffs"]
       - `rate_change_pct_cited` is null OR ∈ valid_facts["rate_percentages"]
+      - `prev_amount_cited` is null OR ∈ {valid_facts["prev_amount"]} (PR-E)
 
     `header` and `explanation` are free strings (no length cap — let
     well_formed score it). The schema returns a `DirectDebitExplainerResponse`
@@ -74,6 +75,11 @@ def build_slot_enforcement_schema(valid_facts: dict[str, list]) -> dict[str, Any
     {0.0} for percentage (the model can still pick null) — JSON schema
     requires at least one enum member, so we fall through to optional null
     when the row genuinely has no facts.
+
+    `prev_amount` (single value: latest.dd_amount - latest.dd_amount_change)
+    is treated similarly: when present, the slot is enum-constrained to the
+    one allowed value or null. If the input has no `latest_dd_change` or the
+    value can't be computed, the slot is null-only.
     """
     triggers = list(TRIGGER_LABELS) + ["No triggers identified"]
     tariff_options: list = ["null"] + list(valid_facts.get("tariffs") or [])
@@ -91,6 +97,15 @@ def build_slot_enforcement_schema(valid_facts: dict[str, list]) -> dict[str, Any
     else:
         pct_field = {"type": "null"}
 
+    prev_amount = valid_facts.get("prev_amount")
+    prev_amount_field: dict[str, Any]
+    if prev_amount is not None:
+        prev_amount_field = {
+            "anyOf": [{"type": "null"}, {"type": "number", "enum": [float(prev_amount)]}],
+        }
+    else:
+        prev_amount_field = {"type": "null"}
+
     return {
         "type": "object",
         "properties": {
@@ -103,6 +118,7 @@ def build_slot_enforcement_schema(valid_facts: dict[str, list]) -> dict[str, Any
                         "header": {"type": "string"},
                         "tariff_cited": tariff_field,
                         "rate_change_pct_cited": pct_field,
+                        "prev_amount_cited": prev_amount_field,
                         "explanation": {"type": "string"},
                     },
                     "required": ["trigger", "header", "explanation"],
