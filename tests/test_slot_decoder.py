@@ -47,18 +47,21 @@ def test_schema_empty_facts_collapses_to_null_only():
 
 
 def test_schema_with_prev_amount_cited():
-    """PR-E: schema enum-constrains prev_amount_cited to the single allowed value."""
+    """PR-E Option B v2: schema force-pins prev_amount_cited to the single allowed
+    value (no null option when a value is available). The field is also added to
+    the per-explanation `required` list so LMFE forces the model to emit it.
+    """
     from dd_explainer_slot_decoder import build_slot_enforcement_schema
 
     schema = build_slot_enforcement_schema(
         {"tariffs": [], "rate_percentages": [], "prev_amount": 90.0}
     )
-    item_props = schema["properties"]["explanations"]["items"]["properties"]
-    field = item_props["prev_amount_cited"]
-    assert "anyOf" in field
-    null_option, num_option = field["anyOf"]
-    assert null_option == {"type": "null"}
-    assert num_option == {"type": "number", "enum": [90.0]}
+    items = schema["properties"]["explanations"]["items"]
+    field = items["properties"]["prev_amount_cited"]
+    # Single-value number enum, no null (forces population)
+    assert field == {"type": "number", "enum": [90.0]}
+    # And the field is required, so LMFE forces emission
+    assert "prev_amount_cited" in items["required"]
 
 
 def test_schema_prev_amount_none_falls_through_to_null():

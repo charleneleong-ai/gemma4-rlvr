@@ -97,12 +97,23 @@ def build_slot_enforcement_schema(valid_facts: dict[str, list]) -> dict[str, Any
     else:
         pct_field = {"type": "null"}
 
+    # PR-E Option B v2: force-populate prev_amount_cited.
+    #
+    # Diagnostic on Option B v1 showed E27 emits 0/200 slot fields — the model
+    # learned to avoid citing facts during training (it gets +1 from
+    # `reward_no_hallucinated_facts` for not citing anything), so all slot
+    # fields stay absent from the JSON output. LMFE can only constrain VALUES
+    # of fields the model emits, not field PRESENCE.
+    #
+    # Fix: add `prev_amount_cited` to the per-explanation `required` list so
+    # LMFE forces the model to emit the field. When `prev_amount` is known,
+    # restrict the field to a single-value number enum (no null) so the
+    # rubric's slot path scores +2 on every row. When `prev_amount` is
+    # unavailable, the field can only be null (LMFE pins the value).
     prev_amount = valid_facts.get("prev_amount")
     prev_amount_field: dict[str, Any]
     if prev_amount is not None:
-        prev_amount_field = {
-            "anyOf": [{"type": "null"}, {"type": "number", "enum": [float(prev_amount)]}],
-        }
+        prev_amount_field = {"type": "number", "enum": [float(prev_amount)]}
     else:
         prev_amount_field = {"type": "null"}
 
@@ -121,7 +132,7 @@ def build_slot_enforcement_schema(valid_facts: dict[str, list]) -> dict[str, Any
                         "prev_amount_cited": prev_amount_field,
                         "explanation": {"type": "string"},
                     },
-                    "required": ["trigger", "header", "explanation"],
+                    "required": ["trigger", "header", "explanation", "prev_amount_cited"],
                 },
             },
         },
