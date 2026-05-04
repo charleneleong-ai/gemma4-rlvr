@@ -63,37 +63,42 @@ def build_slot_enforcement_schema(valid_facts: dict[str, list]) -> dict[str, Any
 
     Schema constrains:
       - `trigger` ∈ TRIGGER_LABELS (always — eliminates schema-violation rows)
-      - `tariff_cited` is null OR ∈ valid_facts["tariffs"]
-      - `rate_change_pct_cited` is null OR ∈ valid_facts["rate_percentages"]
-      - `prev_amount_cited` is null OR ∈ {valid_facts["prev_amount"]} (PR-E)
+      - `tariff_cited` ∈ valid_facts["tariffs"] (required when ≥1 tariff; null-only otherwise)
+      - `rate_change_pct_cited` ∈ valid_facts["rate_percentages"] (required when ≥1 rate; null-only otherwise)
+      - `prev_amount_cited` ∈ {valid_facts["prev_amount"]} (required when set; null-only otherwise)
 
     `header` and `explanation` are free strings (no length cap — let
     well_formed score it). The schema returns a `DirectDebitExplainerResponse`
     shape compatible with the existing `parse_response` Pydantic validator.
 
-    Empty allowed-lists collapse to a single-value enum {""} for tariff and
-    {0.0} for percentage (the model can still pick null) — JSON schema
-    requires at least one enum member, so we fall through to optional null
-    when the row genuinely has no facts.
+    PR-F: when a slot has any allowed values, it is force-populated via
+    `required` + value-enum (no null branch) — same recipe PR-E used for
+    `prev_amount_cited`. LMFE only constrains values of fields the model
+    emits; without `required`, the model learns to omit the field to avoid
+    citing facts. Forcing presence eliminates that loophole.
 
-    `prev_amount` (single value: latest.dd_amount - latest.dd_amount_change)
-    is treated similarly: when present, the slot is enum-constrained to the
-    one allowed value or null. If the input has no `latest_dd_change` or the
-    value can't be computed, the slot is null-only.
+    Empty allowed-lists collapse to null-only and the slot is omitted from
+    `required` (the row genuinely has no facts of that type).
     """
     triggers = list(TRIGGER_LABELS) + ["No triggers identified"]
-    tariff_options: list = ["null"] + list(valid_facts.get("tariffs") or [])
+    tariff_options: list = list(valid_facts.get("tariffs") or [])
     pct_options: list = list(valid_facts.get("rate_percentages") or [])
 
+    # PR-F: same force-population pattern as prev_amount_cited (PR-E Option B v2)
+    # generalised to tariff_cited and rate_change_pct_cited. Dataset audit:
+    # 100% of rows have exactly 1 tariff and ≥1 rate_percentage, so the
+    # required+enum recipe applies cleanly. When a slot's allowed-list is
+    # empty (no facts of that type for the row), the field is null-only and
+    # NOT added to `required`.
     tariff_field: dict[str, Any]
-    if len(tariff_options) > 1:
-        tariff_field = {"anyOf": [{"type": "null"}, {"type": "string", "enum": tariff_options[1:]}]}
+    if tariff_options:
+        tariff_field = {"type": "string", "enum": tariff_options}
     else:
         tariff_field = {"type": "null"}
 
     pct_field: dict[str, Any]
     if pct_options:
-        pct_field = {"anyOf": [{"type": "null"}, {"type": "number", "enum": pct_options}]}
+        pct_field = {"type": "number", "enum": pct_options}
     else:
         pct_field = {"type": "null"}
 
@@ -117,6 +122,12 @@ def build_slot_enforcement_schema(valid_facts: dict[str, list]) -> dict[str, Any
     else:
         prev_amount_field = {"type": "null"}
 
+    required = ["trigger", "header", "explanation", "prev_amount_cited"]
+    if tariff_options:
+        required.append("tariff_cited")
+    if pct_options:
+        required.append("rate_change_pct_cited")
+
     return {
         "type": "object",
         "properties": {
@@ -132,7 +143,7 @@ def build_slot_enforcement_schema(valid_facts: dict[str, list]) -> dict[str, Any
                         "prev_amount_cited": prev_amount_field,
                         "explanation": {"type": "string"},
                     },
-                    "required": ["trigger", "header", "explanation", "prev_amount_cited"],
+                    "required": required,
                 },
             },
         },
