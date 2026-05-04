@@ -468,6 +468,18 @@ def main(
         None,
         help="Free-text notes attached to the W&B run.",
     ),
+    arms: str = typer.Option(
+        "all",
+        help="Comma-separated arm names to run (e.g. 'vanilla', 'two_stage', "
+             "or 'all' for both). Allows splitting arms across parallel jobs.",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume/--no-resume",
+        help="Resume from per-arm checkpoint files (<out>.ckpt.<arm>.jsonl). "
+             "Skips generation for arms whose checkpoint exists; still scores "
+             "under the current rubric.",
+    ),
 ) -> None:
     """Generate + score (default), or re-score cached completions (--rescore-from)."""
     if rescore_from is not None:
@@ -486,8 +498,9 @@ def main(
     classifier = TwoStageClassifier.load(classifier_path)
     typer.echo(f"  classifier ready: head_in_dim={classifier.head_in_dim}")
 
-    typer.echo(f"loading {model_name} + LoRA from {lora_path}…")
-    model, tokenizer = _load_model(model_name, max_seq_length, lora_rank, lora_path=lora_path)
+    # Model + tokenizer loaded lazily -- only when an arm needs generation
+    model = tokenizer = None
+    _model_loaded = False
 
     _, heldout_ds = _load_dataset(data_dir, heldout_n=eval_heldout_n, seed=seed)
     n = len(heldout_ds)
@@ -514,13 +527,7 @@ def main(
     typer.echo(f"  multi-trigger rows: {multi_count}/{n} ({multi_count / n:.1%})")
 
     tokenizer_data = None
-    if enforce_slots:
-        typer.echo("  building LMFE tokenizer-data table (one-time, ~20s)…")
-        t_td = time.monotonic()
-        tokenizer_data = build_tokenizer_data(tokenizer)
-        typer.echo(f"  tokenizer-data ready in {time.monotonic() - t_td:.1f}s")
-
-    arms = [
+    all_arms = [
         EvalArm("vanilla", use_stage1=False, constrain_facts=False, use_lmfe=False),
         EvalArm(
             "two_stage",
@@ -530,20 +537,72 @@ def main(
         ),
     ]
 
+    # --arms filtering
+    if arms.lower() == "all":
+        selected_arms = all_arms
+    else:
+        requested = {a.strip() for a in arms.split(",")}
+        valid_names = {a.name for a in all_arms}
+        unknown = requested - valid_names
+        if unknown:
+            raise typer.BadParameter(
+                f"Unknown arm(s): {unknown}. Valid: {sorted(valid_names)}"
+            )
+        selected_arms = [a for a in all_arms if a.name in requested]
+
     arm_completions: dict[str, list[str]] = {}
     arm_rows: dict[str, list[dict[str, float]]] = {}
     arm_aggregates: dict[str, dict] = {}
-    for arm in arms:
-        completions = _run_arm(
-            arm,
-            model=model,
-            tokenizer=tokenizer,
-            heldout_ds=heldout_ds,
-            predicted_triggers=predicted_triggers,
-            tokenizer_data=tokenizer_data,
-            max_completion_length=max_completion_length,
-            batch_size=batch_size,
-        )
+    for arm in selected_arms:
+        ckpt_path = out.with_suffix(f".ckpt.{arm.name}.jsonl")
+
+        # --resume: load cached completions if checkpoint exists
+        if resume and ckpt_path.exists():
+            typer.echo(f"\nresuming arm '{arm.name}' from {ckpt_path}")
+            completions = [
+                json.loads(line)["completion"]
+                for line in ckpt_path.read_text().splitlines()
+                if line.strip()
+            ]
+            if len(completions) != n:
+                typer.echo(
+                    f"  WARNING: checkpoint has {len(completions)} rows, "
+                    f"expected {n} -- regenerating"
+                )
+                completions = None
+            else:
+                typer.echo(f"  loaded {len(completions)} completions (skipping generation)")
+        else:
+            completions = None
+
+        if completions is None:
+            # Lazy model load on first arm that needs generation
+            if not _model_loaded:
+                typer.echo(f"loading {model_name} + LoRA from {lora_path}…")
+                model, tokenizer = _load_model(model_name, max_seq_length, lora_rank, lora_path=lora_path)
+                if enforce_slots:
+                    typer.echo("  building LMFE tokenizer-data table (one-time, ~20s)…")
+                    t_td = time.monotonic()
+                    tokenizer_data = build_tokenizer_data(tokenizer)
+                    typer.echo(f"  tokenizer-data ready in {time.monotonic() - t_td:.1f}s")
+                _model_loaded = True
+            completions = _run_arm(
+                arm,
+                model=model,
+                tokenizer=tokenizer,
+                heldout_ds=heldout_ds,
+                predicted_triggers=predicted_triggers,
+                tokenizer_data=tokenizer_data,
+                max_completion_length=max_completion_length,
+                batch_size=batch_size,
+            )
+            # Checkpoint: save completions immediately after generation
+            ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+            with ckpt_path.open("w") as fh:
+                for i, comp in enumerate(completions):
+                    fh.write(json.dumps({"i": i, "completion": comp}) + "\n")
+            typer.echo(f"  checkpointed {len(completions)} completions to {ckpt_path}")
+
         arm_completions[arm.name] = completions
         arm_rows[arm.name] = _score_completions(completions, heldout_ds)
         arm_aggregates[arm.name] = _aggregate_scores(arm_rows[arm.name])
@@ -575,7 +634,11 @@ def main(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, default=str))
     typer.echo(f"\nwrote {out}")
-    _print_deltas(arm_aggregates, n, baseline_arm="vanilla", target_arm="two_stage")
+    if "vanilla" in arm_aggregates and "two_stage" in arm_aggregates:
+        _print_deltas(arm_aggregates, n, baseline_arm="vanilla", target_arm="two_stage")
+    else:
+        for name, agg in arm_aggregates.items():
+            typer.echo(f"\n=== {name} (n={n}) ===\n  {_format_agg(agg)}")
 
     per_row_dicts: list[dict[str, Any]] = []
     if dump_per_row or wandb_log:
@@ -615,7 +678,7 @@ def main(
             },
             arm_aggregates=arm_aggregates,
             per_row_dicts=per_row_dicts,
-            arm_names=[arm.name for arm in arms],
+            arm_names=[arm.name for arm in selected_arms],
         )
 
 
