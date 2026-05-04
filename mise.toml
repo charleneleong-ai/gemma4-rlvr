@@ -139,7 +139,6 @@ ls -lht logs/ 2>/dev/null | head -10 || echo "(no logs/ directory)"
 
 # ── autoresearch package wrappers ────────────────────────────────────
 # Wrap the `autoresearch-*` CLIs (from the package) with this project's paths.
-# In-project `experiments/_pr_updater.py` etc. stay until these are battle-tested.
 
 [tasks."pkg-pr-updater"]
 description = "Launch the package-based PR refresher daemon. Pass --config (default train_v2_80gb)."
