@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-05-04-prev-amount-slot"
+RUBRIC_VERSION = "2026-05-04-inaction-loophole-fix"
 
 # Reverted to the uncapped rubric (matching E1 champion) for the data-regen
 # experiment. Rationale: E14 showed that capping the no_halluc penalty makes
@@ -237,6 +237,10 @@ def reward_no_hallucinated_facts(completions, input_json, **kwargs) -> List[floa
     The usage-aware path (added 2026-05-03) closes the rubric bug that fired on
     every `Change in usage` row: prose about "your usage went up 12%" was being
     validated against rate-change %s only, so usage citations always failed.
+
+    Inaction loophole fix (2026-05-04): text that cites zero facts but the input
+    HAS citable tariffs/percents now scores 0.0 (neutral) instead of +1.0.
+    Prevents the model from earning full credit by avoiding citations entirely.
     """
     scores: List[float] = []
     for c, inp in zip(completions, input_json):
@@ -247,7 +251,9 @@ def reward_no_hallucinated_facts(completions, input_json, **kwargs) -> List[floa
         tariffs, real_pcts = _allowed_facts(inp)
 
         score = 1.0
+        any_citation = False
         for m in _TARIFF_RE.finditer(text):
+            any_citation = True
             cited = m.group(1).strip().lower()
             if not any(cited in t or t in cited for t in tariffs if t):
                 score = NO_HALLUC_FAIL_SCORE
@@ -258,9 +264,15 @@ def reward_no_hallucinated_facts(completions, input_json, **kwargs) -> List[floa
                 cited_pct = float(m.group(1))
                 if abs(cited_pct) < 1.0:
                     continue
+                any_citation = True
                 if not any(abs(cited_pct - rp) <= 0.5 for rp in real_pcts):
                     score = NO_HALLUC_FAIL_SCORE
                     break
+
+        # Inaction loophole: text exists but cites no facts while facts
+        # ARE available -> neutral (0) rather than full credit (+1).
+        if score > 0 and not any_citation and (tariffs - {''} or real_pcts):
+            score = 0.0
 
         scores.append(score)
     return scores
@@ -274,8 +286,9 @@ def reward_no_hallucinated_facts_granular(completions, input_json, **kwargs) -> 
     within-group gradient under GRPO when most generations hallucinate.
 
     Granular score = -1.0 + 2.0 × (n_valid / n_total). Range [-1, +1], smooth
-    between the extremes. "No citations" returns +1 (full credit, no
-    hallucination opportunity). Empty completion returns 0.
+    between the extremes. "No citations" returns +1 only when there are no
+    citable facts in the input; returns 0 when facts exist but the model cites
+    none (inaction loophole fix, 2026-05-04). Empty completion returns 0.
 
     Like the binary variant, the allowed-% list combines rate-change %s and
     consumption-change %s (usage-aware rubric, 2026-05-03).
@@ -295,7 +308,9 @@ def reward_no_hallucinated_facts_granular(completions, input_json, **kwargs) -> 
         ]
         n_total = len(cited_tariffs) + len(cited_pcts)
         if n_total == 0:
-            scores.append(1.0)
+            # Inaction loophole: no citations but facts available -> neutral
+            has_citable = bool(tariffs - {''}) or bool(real_pcts)
+            scores.append(0.0 if has_citable else 1.0)
             continue
         n_valid = sum(
             1 for cited in cited_tariffs
@@ -488,7 +503,9 @@ REWARD_FUNCS = [
     reward_triggers_match_ground_truth,
     reward_previous_dd_amount_correct,
     reward_no_hallucinated_facts,
-    reward_underpayment_language_constrained,
+    # reward_underpayment_language_constrained -- demoted to eval-only diagnostic
+    # (2026-05-04): dead weight, 200/200 pass, 0.5 max on every config shipped.
+    # Kept in score_completion() for dashboard visibility.
     reward_explanations_well_formed,
 ]
 
