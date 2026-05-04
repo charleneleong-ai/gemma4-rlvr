@@ -27,6 +27,14 @@ import typer
 from plotly.subplots import make_subplots
 
 from autoresearch.charts import plotly_label_toggle
+from autoresearch.results import (
+    KILL_GPU_SLOW,
+    KILL_GPU_SPIKE,
+    KILL_LOSS_BLOWUP,
+    KILL_NO_LEARNING,
+    KILL_POLICY_DIVERGENCE,
+    categorize_kill_reason,
+)
 
 import re
 
@@ -297,22 +305,28 @@ def _short_summary(r: dict) -> str:
 
 
 def _kill_tag(kill_reason: str) -> str:
-    """Map a long triage reason to a short category for the inline label."""
-    kr = (kill_reason or "").lower()
-    if "kl" in kr and "divergence" in kr:
-        m = re.search(r"\|kl\|=([\d.]+)", kr)
-        return f"killed: kl={m.group(1)} (policy)" if m else "killed: policy divergence"
-    if "loss" in kr and ("divergence" in kr or "blow" in kr):
-        m = re.search(r"\|loss\|=([\d.]+)", kr)
-        return f"killed: |loss|={m.group(1)}" if m else "killed: loss blow-up"
-    if "step_time spike" in kr:
-        m = re.search(r"spike ([\d.]+)s", kr)
-        return f"killed: {m.group(1)}s GPU spike" if m else "killed: GPU spike"
-    if "mean step_time" in kr or "step_time" in kr:
-        m = re.search(r"= ?([\d.]+)s", kr)
-        return f"killed: {m.group(1)}s/step (slow)" if m else "killed: GPU slow"
-    if "no reward" in kr or "baseline" in kr:
+    """Map a long triage reason to a short category for the inline label.
+
+    Thin formatter over `autoresearch.results.categorize_kill_reason` —
+    the regex-based classification lives upstream so it stays in sync
+    across consumers (chart label here, PR narrative cell, screenshot
+    annotation). This function only owns the chart-specific phrasing
+    (`"killed: ..."` prefix + numeric extras when available).
+    """
+    category, extras = categorize_kill_reason(kill_reason)
+    if category == KILL_POLICY_DIVERGENCE:
+        return f"killed: kl={extras['kl']} (policy)" if extras else "killed: policy divergence"
+    if category == KILL_LOSS_BLOWUP:
+        return f"killed: |loss|={extras['loss']}" if extras else "killed: loss blow-up"
+    if category == KILL_GPU_SPIKE:
+        return f"killed: {extras['step_time']}s GPU spike" if extras else "killed: GPU spike"
+    if category == KILL_GPU_SLOW:
+        return f"killed: {extras['step_time']}s/step (slow)" if extras else "killed: GPU slow"
+    if category == KILL_NO_LEARNING:
         return "killed: no learning"
+    # KILL_GPU_HANG / KILL_GPU_WASTED / KILL_GPU_UNDERSIZED / KILL_UNKNOWN —
+    # gemma's pre-extraction regex didn't match these distinctly; fall
+    # through to the truncated-reason form for backward compatibility.
     return f"killed: {kill_reason[:30]}" if kill_reason else "killed early"
 
 
