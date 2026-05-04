@@ -26,11 +26,7 @@ import plotly.graph_objects as go
 import typer
 from plotly.subplots import make_subplots
 
-# Sibling import that works both as direct script and as package member.
-try:
-    from experiments._chart_widgets import plotly_label_toggle
-except ImportError:
-    from _chart_widgets import plotly_label_toggle
+from autoresearch.charts import plotly_label_toggle
 
 import re
 
