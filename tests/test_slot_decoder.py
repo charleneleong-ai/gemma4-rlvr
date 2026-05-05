@@ -43,6 +43,60 @@ def test_schema_empty_facts_collapses_to_null_only():
     item_props = schema["properties"]["explanations"]["items"]["properties"]
     assert item_props["tariff_cited"] == {"type": "null"}
     assert item_props["rate_change_pct_cited"] == {"type": "null"}
+    assert item_props["prev_amount_cited"] == {"type": "null"}
+
+
+def test_schema_with_prev_amount_cited():
+    """PR-E Option B v2: schema force-pins prev_amount_cited to the single allowed
+    value (no null option when a value is available). The field is also added to
+    the per-explanation `required` list so LMFE forces the model to emit it.
+    """
+    from dd_explainer_slot_decoder import build_slot_enforcement_schema
+
+    schema = build_slot_enforcement_schema(
+        {"tariffs": [], "rate_percentages": [], "prev_amount": 90.0}
+    )
+    items = schema["properties"]["explanations"]["items"]
+    field = items["properties"]["prev_amount_cited"]
+    # Single-value number enum, no null (forces population)
+    assert field == {"type": "number", "enum": [90.0]}
+    # And the field is required, so LMFE forces emission
+    assert "prev_amount_cited" in items["required"]
+
+
+def test_schema_prev_amount_none_falls_through_to_null():
+    """When the row has no prev_amount, the slot is null-only (no enum)."""
+    from dd_explainer_slot_decoder import build_slot_enforcement_schema
+
+    schema = build_slot_enforcement_schema(
+        {"tariffs": [], "rate_percentages": [], "prev_amount": None}
+    )
+    item_props = schema["properties"]["explanations"]["items"]["properties"]
+    assert item_props["prev_amount_cited"] == {"type": "null"}
+
+
+def test_extract_valid_facts_returns_prev_amount():
+    """PR-E: extract_valid_facts pulls dd_amount - dd_amount_change."""
+    from dd_explainer_two_stage import extract_valid_facts
+
+    inp = {
+        "account_context": {"contract_history": []},
+        "latest_dd_change": {"dd_amount": 100.0, "dd_amount_change": 10.0},
+    }
+    facts = extract_valid_facts(inp)
+    assert facts["prev_amount"] == 90.0  # 100 - 10
+
+
+def test_extract_valid_facts_prev_amount_handles_missing_change():
+    """When dd_amount_change is None, prev_amount = dd_amount (treats as 0 delta)."""
+    from dd_explainer_two_stage import extract_valid_facts
+
+    inp = {
+        "account_context": {"contract_history": []},
+        "latest_dd_change": {"dd_amount": 75.5, "dd_amount_change": None},
+    }
+    facts = extract_valid_facts(inp)
+    assert facts["prev_amount"] == 75.5
 
 
 def test_prefix_fn_routes_per_row(tokenizer):

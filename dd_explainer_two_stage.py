@@ -154,15 +154,18 @@ class TwoStageClassifier:
         return triggers
 
 
-def extract_valid_facts(input_json: dict[str, Any]) -> dict[str, list]:
+def extract_valid_facts(input_json: dict[str, Any]) -> dict[str, Any]:
     """Pull citation-eligible facts from input_json — matches the contract
-    that `reward_no_hallucinated_facts` validates against.
+    that `reward_no_hallucinated_facts` and `reward_previous_dd_amount_correct`
+    validate against.
 
     Returns:
         {
             "tariffs": [str, ...],            # case-preserved tariff names
             "rate_percentages": [float, ...], # rate change %s; reward only
                                               # validates citations with abs() >= 1.0
+            "prev_amount": float | None,      # PR-E: latest.dd_amount - dd_amount_change,
+                                              # the single allowed value for prev_amount_cited
         }
 
     Used to build a prompt-time constraint that surfaces the verbatim
@@ -195,7 +198,20 @@ def extract_valid_facts(input_json: dict[str, Any]) -> dict[str, list]:
                     pcts.append(fv)
     pcts.sort()
 
-    return {"tariffs": tariffs, "rate_percentages": pcts}
+    # PR-E: the single allowed prev_amount value
+    # (matches `reward_previous_dd_amount_correct` expected = dd_amount - dd_amount_change).
+    prev_amount: float | None = None
+    latest = input_json.get("latest_dd_change") or {}
+    dd_amount = latest.get("dd_amount")
+    dd_amount_change = latest.get("dd_amount_change")
+    if dd_amount is not None:
+        prev_amount = round(float(dd_amount) - float(dd_amount_change or 0.0), 2)
+
+    return {
+        "tariffs": tariffs,
+        "rate_percentages": pcts,
+        "prev_amount": prev_amount,
+    }
 
 
 def build_two_stage_prompt(
@@ -248,6 +264,7 @@ def build_two_stage_prompt(
         if valid_facts is not None:
             tariffs = valid_facts.get("tariffs") or []
             rate_pcts = valid_facts.get("rate_percentages") or []
+            prev_amount = valid_facts.get("prev_amount")
             tariff_block = (
                 "\n".join(f"  - \"{t}\"" for t in tariffs)
                 if tariffs else "  (no tariff names available — do not cite any)"
@@ -258,19 +275,31 @@ def build_two_stage_prompt(
                 "\n".join(f"  - {p:+.2f}%" for p in rate_pcts)
                 if rate_pcts else "  (no rate changes available — do not cite any)"
             )
+            prev_amount_line = (
+                f"  - £{prev_amount:.2f}" if prev_amount is not None
+                else "  (no previous DD amount available)"
+            )
             suffix += (
                 "\n"
                 "GROUNDING CONSTRAINT — VALID FACTS YOU MAY CITE:\n"
-                "The ONLY tariff names + rate-change percentages allowed in your "
-                "explanation are the ones listed below. They come verbatim from "
-                "the account_context above. Do NOT invent or paraphrase any other "
-                "tariff name or percentage; doing so will fail the no_hallucinated_facts rubric.\n\n"
+                "The ONLY tariff names, rate-change percentages, and previous DD "
+                "amount allowed in your explanation are the ones listed below. They "
+                "come verbatim from the account_context / latest_dd_change above. "
+                "Do NOT invent or paraphrase any other tariff name, percentage, or "
+                "amount; doing so will fail the no_hallucinated_facts / "
+                "prev_amount_correct rubrics.\n\n"
                 "Allowed tariff names:\n"
                 f"{tariff_block}\n\n"
                 "Allowed rate change percentages (cite verbatim, magnitudes >=1.0% are checked):\n"
                 f"{pct_block}\n\n"
-                "If a trigger does not require citing a tariff or rate, simply "
-                "describe the change qualitatively without specific facts.\n"
+                "Allowed previous DD amount (cite verbatim if referenced):\n"
+                f"{prev_amount_line}\n\n"
+                "Use the structured slots `tariff_cited` / `rate_change_pct_cited` / "
+                "`prev_amount_cited` (with the {tariff_cited} / {rate_change_pct_cited} / "
+                "{prev_amount_cited} placeholders inside the explanation prose) so the "
+                "rendered output is grounded in the slot values exactly. If a trigger "
+                "does not require citing a tariff, rate, or amount, leave the "
+                "corresponding slot null and describe qualitatively.\n"
             )
         # Content is a list of typed blocks (per `build_chat_messages` shape)
         new_content = []

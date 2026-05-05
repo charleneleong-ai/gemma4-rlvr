@@ -10,7 +10,7 @@
 
 title: |-
   dd_explainer two_stage — cross-experiment progression on n=1000 heldout
-  PR-D rubric fix (#16) breaks the plateau: no_halluc -0.724 -> +1.000, mean_total 10.910 -> 12.634
+  PR-E prev_amount_cited slot (LMFE v2) new SOTA: mean_total 12.634 -> 14.332, pass_all_pct 19.4% -> 31.4%
 
 primary_metric: mean_total
 secondary_metric: no_halluc
@@ -94,3 +94,10 @@ milestones:
       mean_total: 12.634
       no_halluc: 1.000
       pass_all_pct: 19.4
+
+  - label: "E27+LMFE-v2 (PR-E)"
+    description: "Force-populate prev_amount_cited via LMFE required + single-enum — new SOTA, prev_amount perfect 1000/1000"
+    metrics:
+      mean_total: 14.332
+      no_halluc: 1.000
+      pass_all_pct: 31.4
