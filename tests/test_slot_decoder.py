@@ -24,26 +24,62 @@ def tokenizer():
     return AutoTokenizer.from_pretrained("unsloth/gemma-4-E4B-it")
 
 
-def test_schema_with_facts():
+def test_schema_with_facts_force_populates_tariff_and_rate():
+    """PR-F: tariff_cited / rate_change_pct_cited are required + value-enum
+    (no null branch) when the row has any facts of that type. Same recipe
+    PR-E used for prev_amount_cited.
+    """
     from dd_explainer_slot_decoder import build_slot_enforcement_schema
 
     schema = build_slot_enforcement_schema(
         {"tariffs": ["Simply Fixed", "Simply Variable"], "rate_percentages": [12.3, -3.0]}
     )
-    item_props = schema["properties"]["explanations"]["items"]["properties"]
+    items = schema["properties"]["explanations"]["items"]
+    item_props = items["properties"]
     assert item_props["trigger"]["enum"][:1] == ["Manual reduction"]
-    assert "Simply Fixed" in item_props["tariff_cited"]["anyOf"][1]["enum"]
-    assert 12.3 in item_props["rate_change_pct_cited"]["anyOf"][1]["enum"]
+    # No anyOf / null branch — value-enum only
+    assert item_props["tariff_cited"] == {
+        "type": "string", "enum": ["Simply Fixed", "Simply Variable"],
+    }
+    assert item_props["rate_change_pct_cited"] == {
+        "type": "number", "enum": [12.3, -3.0],
+    }
+    # Both fields force-populated via `required`
+    assert "tariff_cited" in items["required"]
+    assert "rate_change_pct_cited" in items["required"]
 
 
 def test_schema_empty_facts_collapses_to_null_only():
+    """When a row has no facts of a given type, the slot is null-only and
+    NOT in required (model is allowed to skip what doesn't exist)."""
     from dd_explainer_slot_decoder import build_slot_enforcement_schema
 
     schema = build_slot_enforcement_schema({"tariffs": [], "rate_percentages": []})
-    item_props = schema["properties"]["explanations"]["items"]["properties"]
+    items = schema["properties"]["explanations"]["items"]
+    item_props = items["properties"]
     assert item_props["tariff_cited"] == {"type": "null"}
     assert item_props["rate_change_pct_cited"] == {"type": "null"}
     assert item_props["prev_amount_cited"] == {"type": "null"}
+    # Empty slots are NOT required
+    assert "tariff_cited" not in items["required"]
+    assert "rate_change_pct_cited" not in items["required"]
+
+
+def test_schema_partial_facts_only_required_when_present():
+    """Mixed row: 1 rate but no tariffs. rate_change_pct_cited is required
+    + value-enum; tariff_cited is null-only and NOT required."""
+    from dd_explainer_slot_decoder import build_slot_enforcement_schema
+
+    schema = build_slot_enforcement_schema(
+        {"tariffs": [], "rate_percentages": [5.5], "prev_amount": 90.0}
+    )
+    items = schema["properties"]["explanations"]["items"]
+    item_props = items["properties"]
+    assert item_props["tariff_cited"] == {"type": "null"}
+    assert item_props["rate_change_pct_cited"] == {"type": "number", "enum": [5.5]}
+    assert "tariff_cited" not in items["required"]
+    assert "rate_change_pct_cited" in items["required"]
+    assert "prev_amount_cited" in items["required"]
 
 
 def test_schema_with_prev_amount_cited():

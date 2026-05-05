@@ -101,3 +101,24 @@ milestones:
       mean_total: 14.332
       no_halluc: 1.000
       pass_all_pct: 31.4
+
+  - label: "PR-E (relaxed)"
+    description: "PR-E generations rescored under v2 rubric (well_formed cap relaxed 3->4 sentences + 2 inaction loopholes closed). Apples-to-apples baseline for PR-F."
+    metrics:
+      mean_total: 13.889
+      no_halluc: 0.817
+      pass_all_pct: 10.7
+
+  - label: "PR-F v3 (ablation)"
+    description: "PR-F slot force-populate (prev_amount + tariff + rate_change_pct) + v3 classifier + relaxed rubric (n=1000) — isolates slot mechanism from v4 contribution."
+    metrics:
+      mean_total: 13.434
+      no_halluc: 1.000
+      pass_all_pct: 11.7
+
+  - label: "PR-F v4 (champion)"
+    description: "PR-F slot force-populate + v4 MLP classifier + relaxed rubric (n=1000) — NEW CHAMPION (mean_total >= 13.9, no_halluc(slots) >= 0.95)."
+    metrics:
+      mean_total: 14.014
+      no_halluc: 1.000
+      pass_all_pct: 11.7

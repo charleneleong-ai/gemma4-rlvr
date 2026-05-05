@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-05-04-inaction-loophole-fix"
+RUBRIC_VERSION = "2026-05-05-well-formed-relaxed-to-4"
 
 # Reverted to the uncapped rubric (matching E1 champion) for the data-regen
 # experiment. Rationale: E14 showed that capping the no_halluc penalty makes
@@ -129,12 +129,21 @@ def reward_schema_valid(completions, **kwargs) -> List[float]:
 
 
 def reward_triggers_in_enum(completions, **kwargs) -> List[float]:
-    """+1.0 if every `explanations[i].trigger` is a valid `Trigger` enum value, else -1.0."""
+    """+1.0 if every `explanations[i].trigger` is a valid `Trigger` enum value, else -1.0.
+
+    Inaction loophole fix (PR-F audit, 2026-05-04): empty `explanations: []`
+    returns -1.0 instead of +1.0. Previously `all(...)` over an empty list was
+    vacuously True, so the model could earn +1 here (and +1 from
+    `reward_schema_valid`) by emitting `{"explanations": []}` — a 2-point
+    free ride for outputting nothing on a task where every dataset row has
+    1-2 ground-truth triggers (audit: 4772 rows with 1, 728 rows with 2,
+    0 with 0).
+    """
     valid = {t.value for t in Trigger}
     scores: List[float] = []
     for c in completions:
         parsed = parse_response(c[0]["content"])
-        if parsed is None:
+        if parsed is None or not parsed.explanations:
             scores.append(-1.0)
             continue
         scores.append(1.0 if all(e.trigger.value in valid for e in parsed.explanations) else -1.0)
@@ -215,12 +224,18 @@ def reward_previous_dd_amount_correct(completions, input_json, **kwargs) -> List
             continue
 
         # Legacy regex path — pre-PR-E completions or rows where the model
-        # didn't populate the slot (still penalised by zero credit, which is
-        # what motivates the slot in the first place).
+        # didn't populate the slot. Used at training time (no LMFE) to push
+        # the policy toward citing instead of abstaining.
         text = _extract_text(parsed)
         cited = [float(m.group(1)) for m in _PREV_AMOUNT_RE.finditer(text)]
         if not cited:
-            scores.append(0.0)
+            # Inaction loophole fix (PR-F audit, 2026-05-04): when the row
+            # HAS a computable prev_amount (100% of dataset rows do), no
+            # citation is always wrong. Penalise at -1 — softer than -3 for
+            # an outright wrong cite (so the policy still prefers attempting
+            # over guessing wildly), but firmly below 0 so abstaining loses
+            # to a correct attempt at +2 within every GRPO group.
+            scores.append(-1.0)
             continue
         scores.append(2.0 if all(abs(v - expected) <= 0.01 for v in cited) else PREV_AMOUNT_FAIL_SCORE)
     return scores
@@ -438,13 +453,21 @@ _SENTENCE_SPLIT_RE = re.compile(r"[.!?]+")
 
 
 def _explanation_well_formed(e) -> bool:
-    """Per-explanation predicate: header ≤ 10 words AND 1-3 sentences."""
+    """Per-explanation predicate: header ≤ 10 words AND 1-4 sentences.
+
+    Length cap relaxed from 3 → 4 sentences (PR-F, 2026-05-05). Diagnostic on
+    cached PR-E n=1000 showed 24.7% of explanations failed by exactly one
+    sentence (188 4-sentence explanations) — a fine length for a customer-
+    facing explainer card. The 6-sentence cluster (218 explanations on certain
+    trigger types) still fails as intended; this only reclaims the off-by-one
+    band.
+    """
     if len(e.header.split()) > 10:
         return False
     n_sentences = sum(
         1 for s in _SENTENCE_SPLIT_RE.split(e.explanation) if s.strip()
     )
-    return 1 <= n_sentences <= 3
+    return 1 <= n_sentences <= 4
 
 
 def reward_explanations_well_formed(completions, **kwargs) -> List[float]:

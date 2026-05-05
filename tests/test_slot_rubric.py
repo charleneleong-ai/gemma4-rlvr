@@ -267,3 +267,106 @@ def test_allowed_facts_includes_abs_for_signed_pcts(usage_decrease_input_json):
     _, pcts = _allowed_facts(usage_decrease_input_json)
     assert -12.38 in pcts        # original signed value preserved
     assert 12.38 in pcts          # abs() variant added so prose magnitude validates
+
+
+# =============================================================================
+# Inaction loophole audit (PR-F, 2026-05-04)
+# =============================================================================
+
+
+def test_empty_explanations_does_not_earn_triggers_in_enum_credit(input_json, gt):
+    """Loophole pre-fix: `{"explanations": []}` made `all(... for e in [])`
+    vacuously True, so reward_triggers_in_enum returned +1.0. Combined with
+    schema_valid (+1) that gave the model a 2-point free ride for emitting
+    nothing on a task where every dataset row has 1-2 GT triggers.
+    Post-fix: empty explanations score -1.0.
+    """
+    s = score_completion('{"explanations": []}', gt, input_json)
+    assert s["schema_valid"] == 1.0  # parse succeeds — that's correct
+    assert s["in_enum"] == -1.0       # but no explanations -> not free credit
+
+
+def test_triggers_in_enum_still_passes_for_valid_nonempty(input_json, gt):
+    """Regression: a normal one-explanation completion with a valid trigger
+    still gets +1.0. The fix only closes the empty-list path."""
+    s = score_completion(_completion(), gt, input_json)
+    assert s["in_enum"] == 1.0
+
+
+def test_prev_amount_no_citation_penalised_when_computable(input_json, gt):
+    """Loophole pre-fix: legacy-regex path returned 0.0 for "no prose cite,
+    no slot populated". 100% of dataset rows have a computable prev_amount,
+    so abstaining is always wrong — yet 0 dominated -3 within GRPO groups
+    when most cite-attempts failed. Post-fix: -1.0 (firmly below 0, softer
+    than -3 so the policy still prefers attempting over guessing wildly).
+    """
+    # _completion's default prose has no "previous|before|was|prior|old £X"
+    # pattern AND no prev_amount_cited slot.
+    s = score_completion(_completion(), gt, input_json)
+    assert s["prev_amount_correct"] == -1.0
+
+
+def test_prev_amount_correct_legacy_cite_still_scores_plus_two(input_json, gt):
+    """Regression: when the prose DOES cite the correct prev_amount via the
+    legacy regex pattern, the reward is still +2.0 (no slot populated)."""
+    # latest.dd_amount=100, dd_amount_change=10 -> expected prev = £90.
+    c = _completion(
+        explanation="Your previous DD was £90.00 before the recent change.",
+    )
+    s = score_completion(c, gt, input_json)
+    assert s["prev_amount_correct"] == 2.0
+
+
+def test_prev_amount_correct_legacy_wrong_cite_still_scores_minus_three(input_json, gt):
+    """Regression: wrong cite still hits PREV_AMOUNT_FAIL_SCORE."""
+    c = _completion(
+        explanation="Your previous DD was £42.00 before the recent change.",
+    )
+    s = score_completion(c, gt, input_json)
+    assert s["prev_amount_correct"] == -3.0
+
+
+def test_prev_amount_slot_populated_path_unaffected_by_inaction_fix(input_json, gt):
+    """Regression: when the model populates prev_amount_cited correctly, it
+    bypasses the legacy regex entirely and scores +2.0. The inaction fix only
+    touches the legacy-no-cite branch."""
+    c = _completion(
+        explanation="Previous DD was {prev_amount_cited}.",
+        prev_amount_cited=90.0,
+    )
+    s = score_completion(c, gt, input_json)
+    assert s["prev_amount_correct"] == 2.0
+
+
+# =============================================================================
+# well_formed length cap — relaxed from 3 to 4 sentences (PR-F, 2026-05-05)
+# =============================================================================
+
+
+def test_well_formed_passes_at_three_sentences(input_json, gt):
+    """Regression: 3 sentences still passes (was the prior cap)."""
+    c = _completion(explanation="One sentence. Two sentence. Three sentence.")
+    s = score_completion(c, gt, input_json)
+    assert s["well_formed"] == 0.5
+
+
+def test_well_formed_passes_at_four_sentences(input_json, gt):
+    """PR-F relaxation: 4 sentences now passes (was failing under prior 3-cap).
+
+    Diagnostic on cached PR-E n=1000 showed 188/1939 explanations (9.7%) had
+    exactly 4 sentences — fine length for a customer-facing explainer card,
+    no benefit to penalising the off-by-one band.
+    """
+    c = _completion(explanation="One. Two. Three. Four sentences total.")
+    s = score_completion(c, gt, input_json)
+    assert s["well_formed"] == 0.5
+
+
+def test_well_formed_still_fails_at_five_sentences(input_json, gt):
+    """The 6-sentence cluster (218 explanations on cached PR-E) still fails.
+    Relaxation only reclaims the off-by-one 4-sentence band, not the long-form
+    cluster that suggests the model is hitting a different generation pattern.
+    """
+    c = _completion(explanation="One. Two. Three. Four. Five sentences here.")
+    s = score_completion(c, gt, input_json)
+    assert s["well_formed"] == -0.5
