@@ -28,8 +28,11 @@ from plotly.subplots import make_subplots
 
 from autoresearch.charts import plotly_label_toggle
 from autoresearch.results import (
+    KILL_GPU_HANG,
     KILL_GPU_SLOW,
     KILL_GPU_SPIKE,
+    KILL_GPU_UNDERSIZED,
+    KILL_GPU_WASTED,
     KILL_LOSS_BLOWUP,
     KILL_NO_LEARNING,
     KILL_POLICY_DIVERGENCE,
@@ -319,9 +322,14 @@ def _kill_tag(kill_reason: str) -> str:
         return f"killed: {extras['step_time']}s/step (slow)" if extras else "killed: GPU slow"
     if category == KILL_NO_LEARNING:
         return "killed: no learning"
-    # KILL_GPU_HANG / KILL_GPU_WASTED / KILL_GPU_UNDERSIZED / KILL_UNKNOWN —
-    # gemma's pre-extraction regex didn't match these distinctly; fall
-    # through to the truncated-reason form for backward compatibility.
+    if category == KILL_GPU_HANG:
+        return "killed: GPU hang"
+    if category == KILL_GPU_WASTED:
+        return "killed: GPU underused"
+    if category == KILL_GPU_UNDERSIZED:
+        return "killed: GPU undersized"
+    # KILL_UNKNOWN — fall through to the truncated-reason form so the
+    # actual text is still surfaced on the chart label.
     return f"killed: {kill_reason[:30]}" if kill_reason else "killed early"
 
 
