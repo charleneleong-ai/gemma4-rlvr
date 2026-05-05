@@ -34,6 +34,7 @@ from autoresearch.results import (
     KILL_NO_LEARNING,
     KILL_POLICY_DIVERGENCE,
     categorize_kill_reason,
+    decide_status,
 )
 
 import re
@@ -153,6 +154,10 @@ def promotion_score(row_or_metrics: dict, fallback_score: float | None = None) -
     return fallback_score
 
 
+def _heldout_score(row: dict) -> float | None:
+    return ((row.get("metrics") or {}).get("heldout") or {}).get("mean_total")
+
+
 def _decide_status(prior: list[dict], score: float, metrics: dict | None = None) -> str:
     """BASELINE for first run; KEEP if better than prior best (KEEP|BASELINE).
 
@@ -162,21 +167,11 @@ def _decide_status(prior: list[dict], score: float, metrics: dict | None = None)
     reward, never mixing the two scales (mixing would let stale train-scored
     baselines block heldout-scored runs from ever winning).
     """
-    kept = [r for r in prior if r["status"] in ("KEEP", "BASELINE")]
-    if not kept:
-        return "BASELINE"
-
-    new_heldout = ((metrics or {}).get("heldout") or {}).get("mean_total")
-    prior_heldout = [
-        ((r.get("metrics") or {}).get("heldout") or {}).get("mean_total")
-        for r in kept
-    ]
-    prior_heldout = [s for s in prior_heldout if s is not None]
-
-    if new_heldout is not None and prior_heldout:
-        return "KEEP" if new_heldout > max(prior_heldout) else "DISCARD"
-    # Fallback: pure train-reward comparison (legacy rows / EARLY_KILL with no eval)
-    return "KEEP" if score > max(r["score"] for r in kept) else "DISCARD"
+    new_heldout = _heldout_score({"metrics": metrics or {}})
+    prior_with_heldout = [r for r in prior if _heldout_score(r) is not None]
+    if new_heldout is not None and prior_with_heldout:
+        return decide_status(prior_with_heldout, new_heldout, score_fn=_heldout_score)
+    return decide_status(prior, score)
 
 
 def log_experiment(

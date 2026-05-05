@@ -28,7 +28,15 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) in sys.path:
     sys.path.remove(str(SCRIPT_DIR))
 
-from autoresearch import IterPlan, SweepRunner  # noqa: E402
+from autoresearch import (  # noqa: E402
+    GPUSample,
+    GPUTriage,
+    GPUTriageThresholds,
+    IterPlan,
+    SweepRunner,
+    crash_reason_from_stdout,
+)
+from autoresearch.gpu_monitor import _nvidia_smi_sample  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -83,12 +91,14 @@ KL_DIVERGE = 1.0
 LOSS_DIVERGE = 10.0
 NO_LEARN_WINDOW = 25
 
-GPU_LOW_UTIL_PCT = 8
-GPU_LOW_UTIL_S = 300
-GPU_UNDERUTIL_PCT = 35
-GPU_UNDERUTIL_S = 900
-GPU_LOW_MEM_PCT = 35
-GPU_LOW_MEM_S = 1800
+# GPU triage thresholds — matched to autoresearch.GPUTriageThresholds defaults
+# except for undersized_mem_pct (gemma4 uses 35%, autoresearch defaults to 50%
+# per CLAUDE.md). Keeping the looser threshold preserves behaviour; tighten
+# in a follow-up if we want CLAUDE.md alignment.
+GPU_TRIAGE_THRESHOLDS = GPUTriageThresholds(
+    grace_s=0,  # outer loop already waits GPU_GRACE_S before first update
+    undersized_mem_pct=35,
+)
 GPU_GRACE_S = 180
 GPU_POLL_S = 30
 GPU_MEM_HEADROOM = 0.65
@@ -96,36 +106,6 @@ GPU_UTIL_LOW_WARN = 50
 
 _FIELD_RE_CACHE: dict[str, re.Pattern[str]] = {}
 WANDB_RE = re.compile(r"https://wandb\.ai/[\w\-./]+/runs/[\w\-]+")
-_CRASH_PATTERNS: list[tuple[re.Pattern[str], str | Any]] = [
-    (
-        re.compile(r"torch\.OutOfMemoryError|CUDA out of memory|OutOfMemoryError"),
-        "CUDA OOM",
-    ),
-    (
-        re.compile(r"Killed\s*$", re.MULTILINE),
-        "killed by host (likely cgroup OOM)",
-    ),
-    (
-        re.compile(r"AssertionError:?\s*(.*)"),
-        lambda m: f"AssertionError: {m.group(1).strip()[:80]}",
-    ),
-    (
-        re.compile(r"RuntimeError:?\s*(.*)"),
-        lambda m: f"RuntimeError: {m.group(1).strip()[:80]}",
-    ),
-    (
-        re.compile(r"ValueError:?\s*(.*)"),
-        lambda m: f"ValueError: {m.group(1).strip()[:80]}",
-    ),
-    (
-        re.compile(r"FileNotFoundError:?\s*(.*)"),
-        lambda m: f"FileNotFoundError: {m.group(1).strip()[:80]}",
-    ),
-    (
-        re.compile(r"^([A-Z][A-Za-z]+Error):?\s*(.*)", re.MULTILINE),
-        lambda m: f"{m.group(1)}: {m.group(2).strip()[:80]}",
-    ),
-]
 
 
 def _ts() -> str:
@@ -170,37 +150,12 @@ def _is_step_line(line: str) -> bool:
     return "'step_time'" in line and "'reward'" in line
 
 
-def _gpu_stats() -> dict[str, float] | None:
-    try:
-        out = (
-            subprocess.check_output(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=utilization.gpu,memory.used,memory.total",
-                    "--format=csv,noheader,nounits",
-                ],
-                timeout=10,
-                text=True,
-            )
-            .strip()
-            .split("\n")[0]
-        )
-        util, used, total = [x.strip() for x in out.split(",")]
-        return {
-            "util_pct": int(util),
-            "mem_used_gb": round(int(used) / 1024, 1),
-            "mem_total_gb": round(int(total) / 1024, 1),
-        }
-    except Exception:
-        return None
-
-
-def _gpu_advisor(samples: list[dict[str, float]], cmd: list[str]) -> None:
+def _gpu_advisor(samples: list[GPUSample], cmd: list[str]) -> None:
     if not samples:
         return
-    utils = [s["util_pct"] for s in samples]
-    mems = [s["mem_used_gb"] for s in samples]
-    total = samples[0]["mem_total_gb"]
+    utils = [s.util_pct for s in samples]
+    mems = [s.mem_used_gb for s in samples]
+    total = samples[0].mem_total_gb
     mean_util = sum(utils) / len(utils)
     peak_mem = max(mems)
 
@@ -250,16 +205,6 @@ def _gpu_advisor(samples: list[dict[str, float]], cmd: list[str]) -> None:
     if hints:
         print("\n".join(hints), flush=True)
     print(flush=True)
-
-
-def _crash_reason_from_lines(lines: list[str]) -> str:
-    text = "".join(lines[-200:])
-    for pat, mapper in _CRASH_PATTERNS:
-        m = pat.search(text)
-        if m:
-            return mapper(m) if callable(mapper) else mapper
-    last = next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
-    return f"unknown: {last[:120]}" if last else "unknown crash"
 
 
 def _patch_logged_row(
@@ -370,7 +315,7 @@ class GemmaTriageMonitor:
         self.recent_rewards: deque[float] = deque(maxlen=NO_LEARN_WINDOW)
         self.recent_lines: deque[str] = deque(maxlen=200)
         self.n_steps = 0
-        self.gpu_samples: list[dict[str, float]] = []
+        self.gpu_samples: list[GPUSample] = []
         self._stop = threading.Event()
         self._reader_thread: threading.Thread | None = None
         self._gpu_thread: threading.Thread | None = None
@@ -469,62 +414,16 @@ class GemmaTriageMonitor:
     def _gpu_loop(self) -> None:
         assert self._proc is not None
         self._stop.wait(GPU_GRACE_S)
-        low_since: float | None = None
-        under_since: float | None = None
-        mem_low_since: float | None = None
-        peak_mem_pct = 0.0
-
+        triage = GPUTriage(GPU_TRIAGE_THRESHOLDS)
         while not self._stop.is_set() and self._proc.poll() is None:
-            sample = _gpu_stats()
-            if sample:
+            sample = _nvidia_smi_sample()
+            if sample is not None:
                 self.gpu_samples.append(sample)
-                util = sample["util_pct"]
-                mem_pct = sample["mem_used_gb"] / sample["mem_total_gb"] * 100
-                peak_mem_pct = max(peak_mem_pct, mem_pct)
-
-                if util < GPU_LOW_UTIL_PCT:
-                    if low_since is None:
-                        low_since = time.monotonic()
-                    elif time.monotonic() - low_since >= GPU_LOW_UTIL_S:
-                        self._set_kill_reason(
-                            f"GPU util {util}% < {GPU_LOW_UTIL_PCT}% "
-                            f"for {GPU_LOW_UTIL_S // 60}min+ — likely hang"
-                        )
-                        self._stop.set()
-                        break
-                    if under_since is None:
-                        under_since = time.monotonic()
-                elif util < GPU_UNDERUTIL_PCT:
-                    low_since = None
-                    if under_since is None:
-                        under_since = time.monotonic()
-                    elif time.monotonic() - under_since >= GPU_UNDERUTIL_S:
-                        self._set_kill_reason(
-                            f"GPU util sustained <{GPU_UNDERUTIL_PCT}% "
-                            f"for {GPU_UNDERUTIL_S // 60}min+ — wasted compute "
-                            f"(last sample {util}%, "
-                            f"{sample['mem_used_gb']:.0f}/{sample['mem_total_gb']:.0f}GB)"
-                        )
-                        self._stop.set()
-                        break
-                else:
-                    low_since = None
-                    under_since = None
-
-                if peak_mem_pct < GPU_LOW_MEM_PCT:
-                    if mem_low_since is None:
-                        mem_low_since = time.monotonic()
-                    elif time.monotonic() - mem_low_since >= GPU_LOW_MEM_S:
-                        self._set_kill_reason(
-                            f"peak GPU mem {peak_mem_pct:.0f}% < {GPU_LOW_MEM_PCT}% "
-                            f"for {GPU_LOW_MEM_S // 60}min+ — undersized config "
-                            f"({sample['mem_used_gb']:.0f}/{sample['mem_total_gb']:.0f}GB; "
-                            "try larger batch / num_generations / max_seq_length)"
-                        )
-                        self._stop.set()
-                        break
-                else:
-                    mem_low_since = None
+                kill = triage.update(sample)
+                if kill is not None:
+                    self._set_kill_reason(kill)
+                    self._stop.set()
+                    break
             self._stop.wait(GPU_POLL_S)
 
     def check(self, elapsed_s: float) -> str | None:
@@ -554,7 +453,7 @@ class GemmaTriageMonitor:
             return None
         if self.last_exit_code in (0, None):
             return None
-        return _crash_reason_from_lines(list(self.recent_lines))
+        return crash_reason_from_stdout(list(self.recent_lines))
 
 
 class GemmaResultExtractor:
