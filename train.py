@@ -533,6 +533,7 @@ def _load_dataset(
     heldout_n: int = 0,
     seed: int = 42,
     stage1_predictions_path: Optional[Path] = None,
+    constrain_facts: bool = False,
 ):
     """Load the newest `dd_dataset_*_*rows.jsonl`. If `heldout_n > 0`, return
     `(train_ds, heldout_ds)` where heldout is `heldout_n` rows sampled with a
@@ -589,12 +590,16 @@ def _load_dataset(
 
     # If we have Stage 1 predictions, splice them into the prompt now.
     if stage1_predictions is not None:
-        from dd_explainer_two_stage import build_two_stage_prompt  # local — heavy import
+        # Local — heavy import.
+        from dd_explainer_two_stage import build_two_stage_prompt, extract_valid_facts
 
         def _inject_two_stage(row):
             triggers = stage1_predictions.get(str(row["row_index"]))
             if triggers:
-                row["prompt"] = build_two_stage_prompt(row["prompt"], triggers)
+                facts = extract_valid_facts(row["input_json"]) if constrain_facts else None
+                row["prompt"] = build_two_stage_prompt(
+                    row["prompt"], triggers, valid_facts=facts,
+                )
             return row
 
         dataset = dataset.map(_inject_two_stage)
@@ -732,6 +737,13 @@ def train(
     # Tunables default to None so the YAML value is kept unless the user
     # explicitly passes a CLI flag (CLI > YAML > Pydantic defaults).
     model_name: Optional[str] = typer.Option(None),
+    lora_path: Optional[Path] = typer.Option(
+        None, "--lora-path",
+        help="Warm-start from an existing LoRA adapter directory. When set, "
+             "skips fresh LoRA attachment and resumes training the saved "
+             "adapter. Required for sweep iterations that build on a prior "
+             "champion (e.g. PR-G resumes from E27 to keep the 14.014 floor).",
+    ),
     data_dir: Optional[Path] = typer.Option(None),
     save_path: Optional[Path] = typer.Option(None),
     output_dir: Optional[Path] = typer.Option(None),
@@ -783,6 +795,15 @@ def train(
              "each training prompt is wrapped with build_two_stage_prompt — "
              "f1_triggers saturates by construction so GRPO optimises on "
              "no_halluc + well_formed + others.",
+    ),
+    constrain_facts: bool = typer.Option(
+        False,
+        "--constrain-facts/--no-constrain-facts",
+        help="Append the GROUNDING CONSTRAINT — VALID FACTS block to each "
+             "training prompt (matching the eval-time --constrain-facts mode). "
+             "Required for PR-G's Stage 2 retrain so train and eval prompt "
+             "distributions match — without it, the model is trained on prompts "
+             "that don't list verifiable facts but evaluated on prompts that do.",
     ),
     eval_batch_size: Optional[int] = typer.Option(None),
     completion_preview_every: Optional[int] = typer.Option(
@@ -869,6 +890,7 @@ def train(
         t.lora_rank,
         load_in_4bit=t.load_in_4bit,
         use_gradient_checkpointing=t.use_gradient_checkpointing,
+        lora_path=lora_path,
     )
     if t.eval_heldout_n > 0:
         dataset, heldout_ds = _load_dataset(
@@ -876,9 +898,14 @@ def train(
             heldout_n=t.eval_heldout_n,
             seed=t.seed,
             stage1_predictions_path=stage1_predictions_path,
+            constrain_facts=constrain_facts,
         )
     else:
-        dataset = _load_dataset(t.data_dir, stage1_predictions_path=stage1_predictions_path)
+        dataset = _load_dataset(
+            t.data_dir,
+            stage1_predictions_path=stage1_predictions_path,
+            constrain_facts=constrain_facts,
+        )
         heldout_ds = None
 
     callbacks = []
