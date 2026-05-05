@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-05-04-inaction-loophole-fix-v2"
+RUBRIC_VERSION = "2026-05-05-well-formed-relaxed-to-4"
 
 # Reverted to the uncapped rubric (matching E1 champion) for the data-regen
 # experiment. Rationale: E14 showed that capping the no_halluc penalty makes
@@ -453,13 +453,21 @@ _SENTENCE_SPLIT_RE = re.compile(r"[.!?]+")
 
 
 def _explanation_well_formed(e) -> bool:
-    """Per-explanation predicate: header ≤ 10 words AND 1-3 sentences."""
+    """Per-explanation predicate: header ≤ 10 words AND 1-4 sentences.
+
+    Length cap relaxed from 3 → 4 sentences (PR-F, 2026-05-05). Diagnostic on
+    cached PR-E n=1000 showed 24.7% of explanations failed by exactly one
+    sentence (188 4-sentence explanations) — a fine length for a customer-
+    facing explainer card. The 6-sentence cluster (218 explanations on certain
+    trigger types) still fails as intended; this only reclaims the off-by-one
+    band.
+    """
     if len(e.header.split()) > 10:
         return False
     n_sentences = sum(
         1 for s in _SENTENCE_SPLIT_RE.split(e.explanation) if s.strip()
     )
-    return 1 <= n_sentences <= 3
+    return 1 <= n_sentences <= 4
 
 
 def reward_explanations_well_formed(completions, **kwargs) -> List[float]:

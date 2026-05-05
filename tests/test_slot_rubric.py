@@ -336,3 +336,37 @@ def test_prev_amount_slot_populated_path_unaffected_by_inaction_fix(input_json, 
     )
     s = score_completion(c, gt, input_json)
     assert s["prev_amount_correct"] == 2.0
+
+
+# =============================================================================
+# well_formed length cap — relaxed from 3 to 4 sentences (PR-F, 2026-05-05)
+# =============================================================================
+
+
+def test_well_formed_passes_at_three_sentences(input_json, gt):
+    """Regression: 3 sentences still passes (was the prior cap)."""
+    c = _completion(explanation="One sentence. Two sentence. Three sentence.")
+    s = score_completion(c, gt, input_json)
+    assert s["well_formed"] == 0.5
+
+
+def test_well_formed_passes_at_four_sentences(input_json, gt):
+    """PR-F relaxation: 4 sentences now passes (was failing under prior 3-cap).
+
+    Diagnostic on cached PR-E n=1000 showed 188/1939 explanations (9.7%) had
+    exactly 4 sentences — fine length for a customer-facing explainer card,
+    no benefit to penalising the off-by-one band.
+    """
+    c = _completion(explanation="One. Two. Three. Four sentences total.")
+    s = score_completion(c, gt, input_json)
+    assert s["well_formed"] == 0.5
+
+
+def test_well_formed_still_fails_at_five_sentences(input_json, gt):
+    """The 6-sentence cluster (218 explanations on cached PR-E) still fails.
+    Relaxation only reclaims the off-by-one 4-sentence band, not the long-form
+    cluster that suggests the model is hitting a different generation pattern.
+    """
+    c = _completion(explanation="One. Two. Three. Four. Five sentences here.")
+    s = score_completion(c, gt, input_json)
+    assert s["well_formed"] == -0.5
