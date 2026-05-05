@@ -1150,14 +1150,22 @@ def _generate_batch(
     messages_list,
     max_completion_length: int,
     prefix_allowed_tokens_fn=None,
-) -> list[str]:
+    logprobs_top_k: int | None = None,
+):
     """Batched temp=0 generation. ~5-8x throughput vs single-row on A100.
 
     `prefix_allowed_tokens_fn` is HF's per-step token-mask callback —
     `fn(batch_id, input_ids) -> list[int]`. Used by PR-B's slot-enforced
-    decoding (see `dd_explainer_slot_decoder.build_slot_prefix_fn`)."""
+    decoding (see `dd_explainer_slot_decoder.build_slot_prefix_fn`).
+
+    When `logprobs_top_k` is set, returns `(completions, logprobs)` where
+    `logprobs[row][step]` is a list of `(token_id, token_str, logprob)` tuples
+    of length `logprobs_top_k`, capturing the model's distribution under
+    whatever constraints were active (LMFE prefix_fn, etc.) at sample time.
+    Otherwise returns just `list[str]` (back-compat with all training callers).
+    """
     if not messages_list:
-        return []
+        return ([], []) if logprobs_top_k is not None else []
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     texts = [
@@ -1175,9 +1183,47 @@ def _generate_batch(
     )
     if prefix_allowed_tokens_fn is not None:
         generate_kwargs["prefix_allowed_tokens_fn"] = prefix_allowed_tokens_fn
+    if logprobs_top_k is not None:
+        generate_kwargs["output_scores"] = True
+        generate_kwargs["return_dict_in_generate"] = True
+
     out = model.generate(**generate_kwargs)
+    if logprobs_top_k is None:
+        prompt_len = enc["input_ids"].shape[1]
+        return [tokenizer.decode(seq[prompt_len:], skip_special_tokens=True) for seq in out]
+
+    sequences = out.sequences
     prompt_len = enc["input_ids"].shape[1]
-    return [tokenizer.decode(seq[prompt_len:], skip_special_tokens=True) for seq in out]
+    completions = [
+        tokenizer.decode(seq[prompt_len:], skip_special_tokens=True) for seq in sequences
+    ]
+    # `out.scores` is a tuple of length `n_generated_steps`, each shape (batch, vocab).
+    # Stop-token positions still produce a score; the EOS token id surfaces in `sequences`.
+    stacked = torch.stack(out.scores, dim=1).float()       # (batch, n_steps, vocab)
+    log_probs = torch.log_softmax(stacked, dim=-1)
+    top_lp, top_ids = log_probs.topk(logprobs_top_k, dim=-1)  # (batch, n_steps, top_k)
+    eos_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id
+    logprobs_per_row: list[list[list[tuple[int, str, float]]]] = []
+    for row_idx in range(sequences.shape[0]):
+        gen_ids = sequences[row_idx, prompt_len:].tolist()
+        row_steps: list[list[tuple[int, str, float]]] = []
+        for step_idx, sampled_id in enumerate(gen_ids):
+            if step_idx >= top_ids.shape[1]:
+                break
+            if sampled_id == pad_id and sampled_id != eos_id:
+                # Sampling halted earlier; the rest is left-pad noise — drop it.
+                break
+            ids = top_ids[row_idx, step_idx].tolist()
+            lps = top_lp[row_idx, step_idx].tolist()
+            row_steps.append([
+                (tid, tokenizer.decode([tid]), float(lp))
+                for tid, lp in zip(ids, lps)
+            ])
+            if sampled_id == eos_id:
+                break
+        logprobs_per_row.append(row_steps)
+    return completions, logprobs_per_row
 
 
 def _aggregate_scores(rows: list[dict]) -> dict:

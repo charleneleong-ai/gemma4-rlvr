@@ -116,12 +116,14 @@ def _run_arm(
     tokenizer_data,
     max_completion_length: int,
     batch_size: int,
-) -> list[str]:
-    """Generate completions for one arm. Returns list of completion strings (length n)."""
+    logprobs_top_k: int | None = None,
+) -> tuple[list[str], list[list[list[tuple[int, str, float]]]] | None]:
+    """Generate completions for one arm. Returns (completions, logprobs|None)."""
     n = len(heldout_ds)
     typer.echo(f"\nrunning arm '{arm.name}': {arm.description()}")
     t0 = time.monotonic()
     completions: list[str] = []
+    all_logprobs: list[list[list[tuple[int, str, float]]]] = []
     for start in range(0, n, batch_size):
         end = min(start + batch_size, n)
         chunk_msgs = []
@@ -145,12 +147,17 @@ def _run_arm(
             schemas = [build_slot_enforcement_schema(f) for f in chunk_facts]
             prefix_fn = build_slot_prefix_fn(tokenizer_data, schemas)
         t_batch = time.monotonic()
-        completions.extend(
-            _generate_batch(
-                model, tokenizer, chunk_msgs, max_completion_length,
-                prefix_allowed_tokens_fn=prefix_fn,
-            )
+        result = _generate_batch(
+            model, tokenizer, chunk_msgs, max_completion_length,
+            prefix_allowed_tokens_fn=prefix_fn,
+            logprobs_top_k=logprobs_top_k,
         )
+        if logprobs_top_k is not None:
+            chunk_completions, chunk_logprobs = result
+            completions.extend(chunk_completions)
+            all_logprobs.extend(chunk_logprobs)
+        else:
+            completions.extend(result)
         elapsed = time.monotonic() - t0
         rate = end / elapsed if elapsed else 0
         eta_s = (n - end) / rate if rate else 0
@@ -160,7 +167,7 @@ def _run_arm(
             f"rate={rate:.2f} rows/s, ETA={eta_s/60:.1f}min)"
         )
     typer.echo(f"  arm '{arm.name}' done in {(time.monotonic() - t0) / 60:.1f}min")
-    return completions
+    return completions, (all_logprobs if logprobs_top_k is not None else None)
 
 
 def _score_completions(
@@ -450,6 +457,15 @@ def main(
         help="If set, skip the model and re-score completions from a previous "
              "<out>.per_row.jsonl under the current rubric. Cheap (~10s).",
     ),
+    save_logprobs: int = typer.Option(
+        0,
+        "--save-logprobs",
+        help="If >0, capture top-K logprobs per generated token under the actual "
+             "(LMFE-constrained) sampling distribution and save them in "
+             "<out>.per_row.jsonl alongside completions. ~5-10%% slower; modest "
+             "extra disk (~3MB/1000 rows at K=5). Required for confidence-based "
+             "diagnostics like scripts/token_confidence_summary.py.",
+    ),
     wandb_log: bool = typer.Option(
         False,
         "--wandb-log/--no-wandb-log",
@@ -552,24 +568,30 @@ def main(
 
     arm_completions: dict[str, list[str]] = {}
     arm_rows: dict[str, list[dict[str, float]]] = {}
+    arm_logprobs_by_arm: dict[str, list[list[list[tuple[int, str, float]]]] | None] = {}
     arm_aggregates: dict[str, dict] = {}
     for arm in selected_arms:
         ckpt_path = out.with_suffix(f".ckpt.{arm.name}.jsonl")
 
         # --resume: load cached completions if checkpoint exists
+        arm_logprobs = None
         if resume and ckpt_path.exists():
             typer.echo(f"\nresuming arm '{arm.name}' from {ckpt_path}")
-            completions = [
-                json.loads(line)["completion"]
+            ckpt_records = [
+                json.loads(line)
                 for line in ckpt_path.read_text().splitlines()
                 if line.strip()
             ]
+            completions = [r["completion"] for r in ckpt_records]
+            if any("logprobs" in r for r in ckpt_records):
+                arm_logprobs = [r.get("logprobs") for r in ckpt_records]
             if len(completions) != n:
                 typer.echo(
                     f"  WARNING: checkpoint has {len(completions)} rows, "
                     f"expected {n} -- regenerating"
                 )
                 completions = None
+                arm_logprobs = None
             else:
                 typer.echo(f"  loaded {len(completions)} completions (skipping generation)")
         else:
@@ -586,7 +608,7 @@ def main(
                     tokenizer_data = build_tokenizer_data(tokenizer)
                     typer.echo(f"  tokenizer-data ready in {time.monotonic() - t_td:.1f}s")
                 _model_loaded = True
-            completions = _run_arm(
+            completions, arm_logprobs = _run_arm(
                 arm,
                 model=model,
                 tokenizer=tokenizer,
@@ -595,15 +617,20 @@ def main(
                 tokenizer_data=tokenizer_data,
                 max_completion_length=max_completion_length,
                 batch_size=batch_size,
+                logprobs_top_k=save_logprobs if save_logprobs > 0 else None,
             )
             # Checkpoint: save completions immediately after generation
             ckpt_path.parent.mkdir(parents=True, exist_ok=True)
             with ckpt_path.open("w") as fh:
                 for i, comp in enumerate(completions):
-                    fh.write(json.dumps({"i": i, "completion": comp}) + "\n")
+                    rec = {"i": i, "completion": comp}
+                    if arm_logprobs is not None:
+                        rec["logprobs"] = arm_logprobs[i]
+                    fh.write(json.dumps(rec) + "\n")
             typer.echo(f"  checkpointed {len(completions)} completions to {ckpt_path}")
 
         arm_completions[arm.name] = completions
+        arm_logprobs_by_arm[arm.name] = arm_logprobs
         arm_rows[arm.name] = _score_completions(completions, heldout_ds)
         arm_aggregates[arm.name] = _aggregate_scores(arm_rows[arm.name])
 
@@ -643,7 +670,7 @@ def main(
     per_row_dicts: list[dict[str, Any]] = []
     if dump_per_row or wandb_log:
         for i in range(n):
-            per_row_dicts.append({
+            row = {
                 "i": i,
                 "ground_truth_triggers": sorted(heldout_ds[i]["ground_truth_triggers"]),
                 "stage1_triggers": sorted(predicted_triggers[i]),
@@ -653,7 +680,13 @@ def main(
                 # Back-compat keys for older readers (per_trigger_leak.py etc).
                 "vanilla": arm_rows.get("vanilla", [{}])[i] if "vanilla" in arm_rows else {},
                 "two_stage": arm_rows.get("two_stage", [{}])[i] if "two_stage" in arm_rows else {},
-            })
+            }
+            arm_logprobs_present = {
+                a: lp for a, lp in arm_logprobs_by_arm.items() if lp is not None
+            }
+            if arm_logprobs_present:
+                row["logprobs"] = {a: lp[i] for a, lp in arm_logprobs_present.items()}
+            per_row_dicts.append(row)
     if dump_per_row:
         per_row_path = out.with_suffix(".per_row.jsonl")
         with per_row_path.open("w") as fh:
