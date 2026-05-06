@@ -155,6 +155,66 @@ def _render_exemption_expiry(grounding: dict[str, Any], valid_facts: dict[str, A
     return {"header": "Exemption period has ended", "explanation": "".join(parts)}
 
 
+def _render_change_in_unit_rates(grounding: dict[str, Any], valid_facts: dict[str, Any]) -> dict[str, str] | None:
+    """Renderer for the 'Change in unit rates' trigger.
+
+    Cites only values guaranteed by `valid_facts`:
+      - tariff name (LLM-passing prose always pairs the trigger with one)
+      - the largest-magnitude rate change % (rubric validates abs >= 1.0)
+      - prev_amount
+
+    Returns None when no tariff is available (rubric needs a tariff anchor
+    to escape the no_halluc inaction loophole on this trigger).
+    """
+    tariff_clause = _tariff_clause(valid_facts)
+    if not tariff_clause:
+        return None
+    rate_pcts = valid_facts.get("rate_percentages") or []
+    significant = [p for p in rate_pcts if abs(p) >= 1.0]
+    rate_clause = ""
+    if significant:
+        biggest = max(significant, key=abs)
+        direction = "increased" if biggest > 0 else "decreased"
+        rate_clause = f" The unit rate has {direction} by {abs(biggest):.2f}% since the previous review."
+    prev = _fmt_gbp(valid_facts.get("prev_amount"))
+    prev_clause = f" Your previous Direct Debit was {prev} and has been adjusted accordingly." if prev else ""
+    return {
+        "header": "Tariff rate adjustments applied",
+        "explanation": (
+            f"Your Direct Debit has been updated because of changes in unit rates"
+            f"{tariff_clause}.{rate_clause}{prev_clause}"
+        ),
+    }
+
+
+def _render_change_in_usage(grounding: dict[str, Any], valid_facts: dict[str, Any]) -> dict[str, str] | None:
+    """Renderer for the 'Change in usage' trigger.
+
+    Cites only values guaranteed by `valid_facts`:
+      - tariff name
+      - prev_amount
+
+    Deliberately avoids quoting a usage percentage: usage-change %s live in
+    `projected_consumption_history.<fuel>.change_percent` not in `valid_facts`,
+    so a citation would require extra grounding the renderer would have to
+    extract itself. Generic "your recent usage patterns" prose is safe under
+    no_halluc since it cites no specific number.
+    """
+    tariff_clause = _tariff_clause(valid_facts)
+    if not tariff_clause:
+        return None
+    prev = _fmt_gbp(valid_facts.get("prev_amount"))
+    prev_clause = f" The previous Direct Debit was {prev}." if prev else ""
+    return {
+        "header": "Direct Debit updated for usage changes",
+        "explanation": (
+            f"Your Direct Debit{tariff_clause} has been reviewed based on your"
+            f" recent usage patterns.{prev_clause}"
+            f" The amount has been adjusted to better reflect your projected consumption."
+        ),
+    }
+
+
 def _render_no_triggers_identified(grounding: dict[str, Any], valid_facts: dict[str, Any]) -> dict[str, str] | None:
     """Stage-1 fallback when no specific trigger fires. Renders prose that
     cites the current tariff so the row escapes the no_halluc inaction
@@ -175,12 +235,25 @@ def _render_no_triggers_identified(grounding: dict[str, Any], valid_facts: dict[
     }
 
 
-_RENDERERS = {
+# Renderers used by `overwrite_explanations` to REPLACE LLM-generated prose
+# for the 4 lonely triggers + the No-triggers fallback. Adding a trigger here
+# means LLM prose for that trigger is overwritten on every row.
+_OVERWRITE_RENDERERS = {
     "First DD review since account start": _render_first_dd_review,
     "Missed/bounced DD payments": _render_missed_payments,
     "Manual reduction": _render_manual_reduction,
     "Exemption Expiry": _render_exemption_expiry,
     NO_TRIGGERS_LABEL: _render_no_triggers_identified,
+}
+
+# Backfill registry — superset of overwrite renderers. Used ONLY when the LLM
+# dropped a Stage-1-predicted trigger, so adding here is safe even if the LLM
+# usually produces good prose for that trigger (this path only fires when the
+# LLM's prose is missing).
+_BACKFILL_RENDERERS = {
+    **_OVERWRITE_RENDERERS,
+    "Change in unit rates": _render_change_in_unit_rates,
+    "Change in usage": _render_change_in_usage,
 }
 
 
@@ -196,7 +269,22 @@ def render_lonely_explanation(
     (caller falls through to LLM-generated prose). Never raises on missing
     fields — degrades to the most general phrasing supported by what's available.
     """
-    fn = _RENDERERS.get(trigger)
+    fn = _OVERWRITE_RENDERERS.get(trigger)
+    if fn is None:
+        return None
+    return fn(grounding, valid_facts)
+
+
+def render_for_backfill(
+    trigger: str,
+    grounding: dict[str, Any],
+    valid_facts: dict[str, Any],
+) -> dict[str, str] | None:
+    """Like `render_lonely_explanation` but also handles `Change in usage` and
+    `Change in unit rates`. Backfill calls this so it can close failures on
+    those triggers without overwriting LLM prose for rows where the LLM did
+    emit them correctly."""
+    fn = _BACKFILL_RENDERERS.get(trigger)
     if fn is None:
         return None
     return fn(grounding, valid_facts)
@@ -303,7 +391,7 @@ def backfill_missing_triggers(
             prob = stage1_probs.get(trigger, 0.0)
             if prob < confidence_threshold:
                 continue
-        rendered = render_lonely_explanation(trigger, grounding, valid_facts)
+        rendered = render_for_backfill(trigger, grounding, valid_facts)
         if rendered is None:
             continue
         explanations.append(_build_backfill_entry(trigger, rendered, valid_facts))
@@ -315,6 +403,7 @@ __all__ = [
     "LONELY_TRIGGERS",
     "NO_TRIGGERS_LABEL",
     "render_lonely_explanation",
+    "render_for_backfill",
     "overwrite_explanations",
     "backfill_missing_triggers",
 ]

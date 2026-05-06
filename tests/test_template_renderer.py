@@ -14,6 +14,7 @@ from dd_explainer_template_renderer import (
     NO_TRIGGERS_LABEL,
     backfill_missing_triggers,
     overwrite_explanations,
+    render_for_backfill,
     render_lonely_explanation,
 )
 
@@ -342,12 +343,12 @@ def test_backfill_gate_threshold_boundary_inclusive():
 
 
 def test_backfill_skips_when_renderer_unavailable():
-    # "Change in usage" has no renderer in the lonely set.
+    # An unknown trigger has no renderer in either registry.
     parsed = {"explanations": []}
     out = backfill_missing_triggers(
         parsed,
-        stage1_triggers=["Change in usage"],
-        stage1_probs={"Change in usage": 0.99},
+        stage1_triggers=["Some Unknown Trigger That Does Not Exist"],
+        stage1_probs={"Some Unknown Trigger That Does Not Exist": 0.99},
         grounding={},
         valid_facts=_valid_facts_simpler(),
     )
@@ -435,6 +436,190 @@ def test_backfill_no_stage1_triggers_is_no_op():
     parsed = {"explanations": []}
     out = backfill_missing_triggers(parsed, [], {}, {}, _valid_facts_simpler())
     assert out["explanations"] == []
+
+
+# --------------------------------------------------------------------------
+# Change in unit rates / Change in usage renderers (backfill-only)
+# --------------------------------------------------------------------------
+
+
+def test_change_in_unit_rates_with_significant_rate_pct():
+    out = render_for_backfill(
+        "Change in unit rates",
+        grounding={},
+        valid_facts={
+            "tariffs": ["2-Year Fixed"],
+            "rate_percentages": [-3.73, 5.62, 0.4],
+            "prev_amount": 132.97,
+        },
+    )
+    assert out is not None
+    assert out["header"] == "Tariff rate adjustments applied"
+    expl = out["explanation"]
+    # Tariff cited via "tariff <Name>" form so _TARIFF_RE accepts it.
+    assert "tariff 2-Year Fixed" in expl
+    # Largest-abs rate (>= 1.0) cited; 0.4 ignored (rubric only validates abs >= 1.0).
+    assert "5.62%" in expl
+    assert "increased" in expl
+    assert "£132.97" in expl
+
+
+def test_change_in_unit_rates_negative_rate_says_decreased():
+    out = render_for_backfill(
+        "Change in unit rates",
+        grounding={},
+        valid_facts={
+            "tariffs": ["Better Energy Fixed"],
+            "rate_percentages": [-7.5, 1.2],
+            "prev_amount": 60.29,
+        },
+    )
+    assert out is not None
+    assert "decreased" in out["explanation"]
+    assert "7.50%" in out["explanation"]
+
+
+def test_change_in_unit_rates_no_significant_rates_omits_clause():
+    out = render_for_backfill(
+        "Change in unit rates",
+        grounding={},
+        valid_facts={
+            "tariffs": ["Simpler Energy"],
+            "rate_percentages": [0.4, -0.8],   # all below abs 1.0
+            "prev_amount": 80.0,
+        },
+    )
+    assert out is not None
+    # No rate clause because none meets the rubric's abs >= 1.0 threshold.
+    assert "%" not in out["explanation"]
+    assert "tariff Simpler Energy" in out["explanation"]
+
+
+def test_change_in_unit_rates_returns_none_without_tariff():
+    out = render_for_backfill(
+        "Change in unit rates",
+        grounding={},
+        valid_facts={"tariffs": [], "rate_percentages": [5.0], "prev_amount": 100.0},
+    )
+    assert out is None
+
+
+def test_change_in_usage_renders_without_pct():
+    out = render_for_backfill(
+        "Change in usage",
+        grounding={},
+        valid_facts={
+            "tariffs": ["Simpler Energy"],
+            "rate_percentages": [],
+            "prev_amount": 112.17,
+        },
+    )
+    assert out is not None
+    assert out["header"] == "Direct Debit updated for usage changes"
+    expl = out["explanation"]
+    # Tariff cited.
+    assert "tariff Simpler Energy" in expl
+    # No specific usage % invented (the renderer deliberately doesn't cite one).
+    assert "%" not in expl
+    # prev_amount cited.
+    assert "£112.17" in expl
+
+
+def test_change_in_usage_returns_none_without_tariff():
+    out = render_for_backfill(
+        "Change in usage",
+        grounding={},
+        valid_facts={"tariffs": [], "rate_percentages": [], "prev_amount": 80.0},
+    )
+    assert out is None
+
+
+def test_render_lonely_does_not_overwrite_change_in_usage():
+    """`render_lonely_explanation` must NOT overwrite Change in usage / unit rates
+    so passing LLM prose for those triggers stays untouched."""
+    out = render_lonely_explanation(
+        "Change in usage",
+        grounding={},
+        valid_facts={
+            "tariffs": ["Simpler Energy"],
+            "rate_percentages": [],
+            "prev_amount": 112.17,
+        },
+    )
+    assert out is None
+    out = render_lonely_explanation(
+        "Change in unit rates",
+        grounding={},
+        valid_facts={
+            "tariffs": ["2-Year Fixed"],
+            "rate_percentages": [5.0],
+            "prev_amount": 100.0,
+        },
+    )
+    assert out is None
+
+
+def test_overwrite_explanations_does_not_touch_change_in_usage():
+    """Belt-and-braces: overwrite_explanations leaves Change in usage prose alone."""
+    parsed = {"explanations": [{
+        "trigger": "Change in usage",
+        "header": "<llm header>",
+        "explanation": "<llm prose with usage % 23.23%>",
+        "tariff_cited": "Simpler Energy",
+        "rate_change_pct_cited": 0.0,
+        "prev_amount_cited": 112.17,
+    }]}
+    out = overwrite_explanations(parsed, {}, {
+        "tariffs": ["Simpler Energy"], "rate_percentages": [], "prev_amount": 112.17,
+    })
+    assert out["explanations"][0]["header"] == "<llm header>"
+    assert out["explanations"][0]["explanation"] == "<llm prose with usage % 23.23%>"
+
+
+def test_backfill_now_handles_change_in_unit_rates():
+    parsed = {"explanations": [
+        {"trigger": "Manual reduction", "header": "h", "explanation": "e",
+         "tariff_cited": "2-Year Fixed", "rate_change_pct_cited": 0.0,
+         "prev_amount_cited": 132.97},
+    ]}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["Manual reduction", "Change in unit rates"],
+        stage1_probs={"Manual reduction": 0.99, "Change in unit rates": 0.99},
+        grounding={},
+        valid_facts={
+            "tariffs": ["2-Year Fixed"],
+            "rate_percentages": [5.62],
+            "prev_amount": 132.97,
+        },
+    )
+    triggers = [e["trigger"] for e in out["explanations"]]
+    assert triggers == ["Manual reduction", "Change in unit rates"]
+    appended = out["explanations"][1]
+    assert "5.62%" in appended["explanation"]
+    assert appended["tariff_cited"] == "2-Year Fixed"
+    assert appended["prev_amount_cited"] == 132.97
+
+
+def test_backfill_now_handles_change_in_usage():
+    parsed = {"explanations": [
+        {"trigger": "Missed/bounced DD payments", "header": "h", "explanation": "e",
+         "tariff_cited": "Simpler Energy", "rate_change_pct_cited": 0.0,
+         "prev_amount_cited": 112.17},
+    ]}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["Missed/bounced DD payments", "Change in usage"],
+        stage1_probs={"Missed/bounced DD payments": 0.99, "Change in usage": 0.99},
+        grounding={},
+        valid_facts={
+            "tariffs": ["Simpler Energy"],
+            "rate_percentages": [],
+            "prev_amount": 112.17,
+        },
+    )
+    triggers = [e["trigger"] for e in out["explanations"]]
+    assert triggers == ["Missed/bounced DD payments", "Change in usage"]
 
 
 def test_backfill_handles_missing_tariff_in_valid_facts():
