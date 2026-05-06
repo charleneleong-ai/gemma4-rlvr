@@ -1,0 +1,37 @@
+{
+  "rubric_version": "2026-05-05-well-formed-relaxed-to-4",
+  "n_heldout": 1000,
+  "rescored_from": "data/eval_pr_g_e28_n1000.per_row.jsonl",
+  "use_templates": true,
+  "two_stage": {
+    "n": 1000,
+    "pass_all": 441,
+    "pass_all_pct": 44.1,
+    "pass_thresholds": {
+      "schema_valid": 1.0,
+      "in_enum": 1.0,
+      "f1_triggers": 10.0,
+      "prev_amount_correct": 0.0,
+      "no_hallucinated_facts": 1.0,
+      "underpayment_ok": 0.5,
+      "well_formed": 0.5
+    },
+    "rubric_version": "2026-05-05-well-formed-relaxed-to-4",
+    "schema_valid_pass": 1000,
+    "schema_valid_mean": 1.0,
+    "in_enum_pass": 1000,
+    "in_enum_mean": 1.0,
+    "f1_triggers_pass": 745,
+    "f1_triggers_mean": 9.067,
+    "prev_amount_correct_pass": 1000,
+    "prev_amount_correct_mean": 2.0,
+    "no_hallucinated_facts_pass": 888,
+    "no_hallucinated_facts_mean": 0.879,
+    "underpayment_ok_pass": 1000,
+    "underpayment_ok_mean": 0.5,
+    "well_formed_pass": 723,
+    "well_formed_mean": 0.238,
+    "mean_total": 14.684,
+    "no_hallucinated_facts_slots_mean": 1.0
+  }
+}

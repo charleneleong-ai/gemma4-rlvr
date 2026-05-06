@@ -214,11 +214,76 @@ def extract_valid_facts(input_json: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def extract_trigger_grounding(input_json: dict[str, Any]) -> dict[str, Any]:
+    """Pull deterministic per-trigger grounding signals from input_json.
+
+    The PR-G eval showed that when triggers like 'First DD review since
+    account start', 'Missed/bounced DD payments', 'Manual reduction', or
+    'Exemption Expiry' fire alone, row-level no_halluc collapses to ~0%
+    because the model has no grounded source to anchor explanatory prose
+    to and falls back to fabricated template language. These signals
+    are 100%-recall / 0%-FPR derivable from the structured input — we
+    just weren't surfacing them. Returns one block per trigger with the
+    raw values needed to write a grounded explanation.
+    """
+    ac = input_json.get("account_context", {}) or {}
+    hist = ac.get("dd_change_history") or []
+    pay = ac.get("payment_history") or []
+    latest = input_json.get("latest_dd_change") or {}
+
+    grounding: dict[str, Any] = {}
+
+    # First DD review since account start
+    n_prior_dd = max(0, len(hist) - 1)
+    if n_prior_dd == 0:
+        grounding["first_dd_review"] = {
+            "is_first": True,
+            "n_prior_dd_entries": 0,
+        }
+
+    # Missed/bounced DD payments
+    failed = [p for p in pay if not p.get("is_payment_successful", True)]
+    if failed:
+        most_recent = failed[-1]
+        grounding["missed_payments"] = {
+            "n_missed": len(failed),
+            "most_recent_period": most_recent.get("payment_period"),
+            "most_recent_amount_gbp": most_recent.get("transaction_amount_in_pounds"),
+            "most_recent_timestamp": most_recent.get("transaction_timestamp"),
+        }
+
+    # Manual reduction (current or immediately-prior period)
+    is_manual_now = bool(latest.get("is_amount_manually_reduced_lower_than_recommended_amount"))
+    prev_dd = hist[-2] if len(hist) >= 2 else None
+    prev_is_manual = bool(prev_dd and prev_dd.get("is_amount_manually_reduced_lower_than_recommended_amount"))
+    if is_manual_now or prev_is_manual:
+        src = latest if is_manual_now else (prev_dd or {})
+        grounding["manual_reduction"] = {
+            "active_in": "current_period" if is_manual_now else "previous_period",
+            "manual_dd_amount_gbp": src.get("dd_amount"),
+            "recommended_dd_amount_gbp": src.get("recommended_dd_amount"),
+            "period_start": src.get("datetime_from"),
+        }
+
+    # Exemption Expiry — exemption was active in prior DD entry, not in current
+    is_exemption_now = bool(latest.get("is_exemption"))
+    prev_is_exemption = bool(prev_dd and prev_dd.get("is_exemption"))
+    if prev_is_exemption and not is_exemption_now:
+        grounding["exemption_expiry"] = {
+            "expired_on": (prev_dd or {}).get("exemption_expiry_date"),
+            "previous_dd_amount_gbp": (prev_dd or {}).get("dd_amount"),
+            "previous_recommended_dd_amount_gbp": (prev_dd or {}).get("recommended_dd_amount"),
+        }
+
+    return grounding
+
+
 def build_two_stage_prompt(
     base_messages: list[dict[str, Any]],
     triggers: list[str],
     *,
     valid_facts: dict[str, list] | None = None,
+    trigger_grounding: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Modify a `build_chat_messages` output to include predicted triggers.
 
@@ -301,6 +366,32 @@ def build_two_stage_prompt(
                 "does not require citing a tariff, rate, or amount, leave the "
                 "corresponding slot null and describe qualitatively.\n"
             )
+
+        if trigger_grounding:
+            grounding_lines: list[str] = []
+            label_map = {
+                "first_dd_review": "First DD review since account start",
+                "missed_payments": "Missed/bounced DD payments",
+                "manual_reduction": "Manual reduction",
+                "exemption_expiry": "Exemption Expiry",
+            }
+            for key, label in label_map.items():
+                ctx = trigger_grounding.get(key)
+                if not ctx:
+                    continue
+                ctx_json = json.dumps(ctx, indent=2, default=str)
+                grounding_lines.append(f"- Trigger {label!r}:\n{ctx_json}")
+            if grounding_lines:
+                suffix += (
+                    "\n"
+                    "TRIGGER GROUNDING CONTEXT (use these structured anchors when "
+                    "writing the explanation prose for the matching trigger; do not "
+                    "invent template phrases like 'standard process', 'to cover the "
+                    "difference', 'necessary catch-up' that are not anchored in these "
+                    "values or the account context above):\n"
+                    + "\n\n".join(grounding_lines)
+                    + "\n"
+                )
         # Content is a list of typed blocks (per `build_chat_messages` shape)
         new_content = []
         for block in msg["content"]:
@@ -313,4 +404,9 @@ def build_two_stage_prompt(
     return new_messages
 
 
-__all__ = ["TwoStageClassifier", "build_two_stage_prompt", "extract_valid_facts"]
+__all__ = [
+    "TwoStageClassifier",
+    "build_two_stage_prompt",
+    "extract_valid_facts",
+    "extract_trigger_grounding",
+]

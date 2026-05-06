@@ -58,9 +58,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from autoresearch import GPUMonitor  # noqa: E402
 
 from dd_explainer_rewards import RUBRIC_VERSION, score_completion  # noqa: E402
+from dd_explainer_template_renderer import overwrite_explanations  # noqa: E402
 from dd_explainer_two_stage import (  # noqa: E402
     TwoStageClassifier,
     build_two_stage_prompt,
+    extract_trigger_grounding,
     extract_valid_facts,
 )
 from dd_explainer_slot_decoder import (  # noqa: E402
@@ -85,6 +87,7 @@ class EvalArm:
     use_stage1: bool
     constrain_facts: bool
     use_lmfe: bool
+    use_templates: bool = False
 
     def description(self) -> str:
         if not self.use_stage1:
@@ -94,6 +97,8 @@ class EvalArm:
             bits.append("VALID FACTS prompt list")
         if self.use_lmfe:
             bits.append("LMFE slot mask")
+        if self.use_templates:
+            bits.append("lonely-trigger templates")
         return " + ".join(bits)
 
 
@@ -135,8 +140,11 @@ def _run_arm(
                 facts = extract_valid_facts(inp)
                 chunk_facts.append(facts)
                 constrain_arg = facts if arm.constrain_facts else None
+                grounding_arg = extract_trigger_grounding(inp) if arm.constrain_facts else None
                 msg = build_two_stage_prompt(
-                    base, predicted_triggers[i], valid_facts=constrain_arg,
+                    base, predicted_triggers[i],
+                    valid_facts=constrain_arg,
+                    trigger_grounding=grounding_arg,
                 )
             else:
                 msg = base
@@ -348,12 +356,19 @@ def _rescore_from_per_row(
     per_row_path: Path,
     out: Path,
     *,
+    use_templates: bool = False,
     wandb_log: bool = False,
     wandb_project: str = "gemma4-rlvr-eval",
     wandb_run_name: Optional[str] = None,
     wandb_notes: Optional[str] = None,
 ) -> None:
-    """Re-score cached completions from a previous run under the current rubric."""
+    """Re-score cached completions from a previous run under the current rubric.
+
+    If `use_templates` is set, post-processes each completion through
+    `overwrite_explanations` (lonely-trigger templates) before scoring.
+    Original completions are preserved in the output's `completions` field;
+    `templated_completions` is written alongside when templates were applied.
+    """
     rows = [json.loads(l) for l in per_row_path.read_text().splitlines() if l.strip()]
     if not rows:
         raise typer.BadParameter(f"{per_row_path} is empty")
@@ -366,16 +381,38 @@ def _rescore_from_per_row(
     typer.echo(
         f"rescore mode: {len(rows)} rows × {len(arm_names)} arms ({arm_names}) "
         f"under rubric {RUBRIC_VERSION}"
+        + (" + lonely-trigger templates" if use_templates else "")
     )
     arm_aggregates: dict[str, dict] = {}
     rescored_rows: list[dict[str, Any]] = []
+    n_overwritten = 0
+    n_parse_failed = 0
     for i, r in enumerate(rows):
         new_scores: dict[str, dict[str, float]] = {}
         gt = sorted(r["ground_truth_triggers"])
         inp = r["input_json"]
         for arm in arm_names:
-            new_scores[arm] = score_completion(r["completions"][arm], gt, inp)
+            comp = r["completions"][arm]
+            if use_templates and arm != "vanilla":
+                grounding = extract_trigger_grounding(inp)
+                facts = extract_valid_facts(inp)
+                try:
+                    parsed = json.loads(comp)
+                    before = json.dumps(parsed, sort_keys=True)
+                    parsed = overwrite_explanations(parsed, grounding, facts)
+                    after = json.dumps(parsed, sort_keys=True)
+                    if before != after:
+                        n_overwritten += 1
+                    comp = json.dumps(parsed, indent=2)
+                except (json.JSONDecodeError, TypeError):
+                    n_parse_failed += 1
+            new_scores[arm] = score_completion(comp, gt, inp)
         rescored_rows.append({**r, "scores": new_scores})
+    if use_templates:
+        typer.echo(
+            f"  templates: overwrote {n_overwritten} arm-rows; "
+            f"{n_parse_failed} json-parse failures"
+        )
     for arm in arm_names:
         arm_aggregates[arm] = _aggregate_scores([r["scores"][arm] for r in rescored_rows])
 
@@ -383,7 +420,10 @@ def _rescore_from_per_row(
     payload = _build_payload(
         arm_aggregates=arm_aggregates,
         n=n,
-        heldout_meta={"rescored_from": str(per_row_path)},
+        heldout_meta={
+            "rescored_from": str(per_row_path),
+            "use_templates": use_templates,
+        },
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, default=str))
@@ -440,6 +480,14 @@ def main(
         "--enforce-slots/--no-enforce-slots",
         help="Two-stage arm: token-mask via lm-format-enforcer on `tariff_cited` / "
              "`rate_change_pct_cited` slots (PR-B).",
+    ),
+    use_templates: bool = typer.Option(
+        False,
+        "--use-templates/--no-use-templates",
+        help="Two-stage arm: post-generation, overwrite header+explanation for the "
+             "4 lonely triggers (First DD review / Missed-bounced / Manual reduction "
+             "/ Exemption Expiry) with deterministic templates rendered from "
+             "extract_trigger_grounding values. Slot fields untouched.",
     ),
     out: Path = typer.Option(
         Path("data/two_stage_eval_v0.json"),
@@ -501,6 +549,7 @@ def main(
     if rescore_from is not None:
         _rescore_from_per_row(
             rescore_from, out,
+            use_templates=use_templates,
             wandb_log=wandb_log,
             wandb_project=wandb_project,
             wandb_run_name=wandb_run_name,
@@ -550,6 +599,7 @@ def main(
             use_stage1=True,
             constrain_facts=constrain_facts,
             use_lmfe=enforce_slots,
+            use_templates=use_templates,
         ),
     ]
 
@@ -629,9 +679,41 @@ def main(
                     fh.write(json.dumps(rec) + "\n")
             typer.echo(f"  checkpointed {len(completions)} completions to {ckpt_path}")
 
-        arm_completions[arm.name] = completions
+        # Lonely-trigger templates: post-generation, parse the LLM JSON,
+        # overwrite header+explanation for the 4 lonely triggers with
+        # deterministic templates rendered from extract_trigger_grounding
+        # values. Slot fields untouched. Raw completions stay in the
+        # checkpoint above so --rescore-from can A/B with/without templates.
+        scoring_completions = completions
+        if arm.use_templates:
+            n_overwritten = 0
+            n_parse_failed = 0
+            templated: list[str] = []
+            for i, comp in enumerate(completions):
+                inp = heldout_ds[i]["input_json"]
+                grounding = extract_trigger_grounding(inp)
+                facts = extract_valid_facts(inp)
+                try:
+                    parsed = json.loads(comp)
+                except (json.JSONDecodeError, TypeError):
+                    n_parse_failed += 1
+                    templated.append(comp)
+                    continue
+                before = json.dumps(parsed, sort_keys=True)
+                parsed = overwrite_explanations(parsed, grounding, facts)
+                after = json.dumps(parsed, sort_keys=True)
+                if before != after:
+                    n_overwritten += 1
+                templated.append(json.dumps(parsed, indent=2))
+            scoring_completions = templated
+            typer.echo(
+                f"  templates: overwrote {n_overwritten}/{len(completions)} rows; "
+                f"{n_parse_failed} json-parse failures (left as-is)"
+            )
+
+        arm_completions[arm.name] = scoring_completions
         arm_logprobs_by_arm[arm.name] = arm_logprobs
-        arm_rows[arm.name] = _score_completions(completions, heldout_ds)
+        arm_rows[arm.name] = _score_completions(scoring_completions, heldout_ds)
         arm_aggregates[arm.name] = _aggregate_scores(arm_rows[arm.name])
 
     gpu_monitor.stop()
@@ -646,6 +728,7 @@ def main(
             "lora_path": str(lora_path),
             "constrain_facts": constrain_facts,
             "enforce_slots": enforce_slots,
+            "use_templates": use_templates,
             "stage1_trigger_distribution": dict(trigger_counter),
             "stage1_multi_trigger_rate": multi_count / n if n else 0.0,
         },

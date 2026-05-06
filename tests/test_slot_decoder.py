@@ -135,6 +135,130 @@ def test_extract_valid_facts_prev_amount_handles_missing_change():
     assert facts["prev_amount"] == 75.5
 
 
+# PR-H: trigger grounding extraction. Each predicate is 100%-recall / 0%-FPR
+# vs the corresponding ground-truth trigger in the n=1000 PR-G eval.
+
+def test_extract_trigger_grounding_first_dd_review():
+    from dd_explainer_two_stage import extract_trigger_grounding
+
+    only_one = {
+        "account_context": {"dd_change_history": [{"is_currently_active_DD": True}]},
+        "latest_dd_change": {},
+    }
+    g = extract_trigger_grounding(only_one)
+    assert g["first_dd_review"] == {"is_first": True, "n_prior_dd_entries": 0}
+
+    has_prior = {
+        "account_context": {"dd_change_history": [{}, {}]},
+        "latest_dd_change": {},
+    }
+    assert "first_dd_review" not in extract_trigger_grounding(has_prior)
+
+
+def test_extract_trigger_grounding_missed_payments():
+    from dd_explainer_two_stage import extract_trigger_grounding
+
+    inp = {
+        "account_context": {
+            "dd_change_history": [],
+            "payment_history": [
+                {"is_payment_successful": True, "payment_period": "Aug 2025",
+                 "transaction_amount_in_pounds": 80.0, "transaction_timestamp": "2025-08-01"},
+                {"is_payment_successful": False, "payment_period": "Sep 2025",
+                 "transaction_amount_in_pounds": 80.0, "transaction_timestamp": "2025-09-01"},
+            ],
+        },
+        "latest_dd_change": {},
+    }
+    g = extract_trigger_grounding(inp)
+    assert g["missed_payments"]["n_missed"] == 1
+    assert g["missed_payments"]["most_recent_period"] == "Sep 2025"
+    assert g["missed_payments"]["most_recent_amount_gbp"] == 80.0
+
+    clean = {"account_context": {"payment_history": [{"is_payment_successful": True}]}}
+    assert "missed_payments" not in extract_trigger_grounding(clean)
+
+
+def test_extract_trigger_grounding_manual_reduction():
+    from dd_explainer_two_stage import extract_trigger_grounding
+
+    # Manual reduction in current period
+    inp_now = {
+        "account_context": {"dd_change_history": [{}, {}]},
+        "latest_dd_change": {
+            "is_amount_manually_reduced_lower_than_recommended_amount": True,
+            "dd_amount": 60.0, "recommended_dd_amount": 90.0,
+            "datetime_from": "2026-01-01",
+        },
+    }
+    g = extract_trigger_grounding(inp_now)
+    assert g["manual_reduction"]["active_in"] == "current_period"
+    assert g["manual_reduction"]["manual_dd_amount_gbp"] == 60.0
+
+    # Previous-period only
+    inp_prev = {
+        "account_context": {"dd_change_history": [
+            {"is_amount_manually_reduced_lower_than_recommended_amount": True,
+             "dd_amount": 50.0, "recommended_dd_amount": 80.0, "datetime_from": "2025-01-01"},
+            {},
+        ]},
+        "latest_dd_change": {"is_amount_manually_reduced_lower_than_recommended_amount": False},
+    }
+    g = extract_trigger_grounding(inp_prev)
+    assert g["manual_reduction"]["active_in"] == "previous_period"
+    assert g["manual_reduction"]["manual_dd_amount_gbp"] == 50.0
+
+    none = {"account_context": {"dd_change_history": []}, "latest_dd_change": {}}
+    assert "manual_reduction" not in extract_trigger_grounding(none)
+
+
+def test_extract_trigger_grounding_exemption_expiry():
+    from dd_explainer_two_stage import extract_trigger_grounding
+
+    inp = {
+        "account_context": {"dd_change_history": [
+            {"is_exemption": True, "exemption_expiry_date": "2025-10-28",
+             "dd_amount": 70.0, "recommended_dd_amount": 100.0},
+            {"is_exemption": False},
+        ]},
+        "latest_dd_change": {"is_exemption": False},
+    }
+    g = extract_trigger_grounding(inp)
+    assert g["exemption_expiry"]["expired_on"] == "2025-10-28"
+    assert g["exemption_expiry"]["previous_dd_amount_gbp"] == 70.0
+
+    # Still on exemption — not expired
+    still_active = {
+        "account_context": {"dd_change_history": [
+            {"is_exemption": True, "exemption_expiry_date": "2025-10-28"},
+            {"is_exemption": True},
+        ]},
+        "latest_dd_change": {"is_exemption": True},
+    }
+    assert "exemption_expiry" not in extract_trigger_grounding(still_active)
+
+
+def test_build_two_stage_prompt_renders_grounding_block_only_when_present():
+    """Grounding block appears in the prompt suffix only when extract_trigger_grounding
+    returned at least one trigger context."""
+    from dd_explainer_two_stage import build_two_stage_prompt
+
+    base = [{"role": "user", "content": [{"type": "text", "text": "x"}]}]
+    msg = build_two_stage_prompt(
+        base, ["First DD review since account start"],
+        trigger_grounding={"first_dd_review": {"is_first": True, "n_prior_dd_entries": 0}},
+    )
+    text = msg[0]["content"][0]["text"]
+    assert "TRIGGER GROUNDING CONTEXT" in text
+    assert "First DD review since account start" in text
+
+    msg_empty = build_two_stage_prompt(base, ["x"], trigger_grounding={})
+    assert "TRIGGER GROUNDING CONTEXT" not in msg_empty[0]["content"][0]["text"]
+
+    msg_none = build_two_stage_prompt(base, ["x"], trigger_grounding=None)
+    assert "TRIGGER GROUNDING CONTEXT" not in msg_none[0]["content"][0]["text"]
+
+
 def test_prefix_fn_routes_per_row(tokenizer):
     from dd_explainer_slot_decoder import (
         build_slot_enforcement_schema,
