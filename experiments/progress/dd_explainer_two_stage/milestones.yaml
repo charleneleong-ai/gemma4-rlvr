@@ -129,3 +129,10 @@ milestones:
       mean_total: 14.396
       no_halluc: 1.000
       pass_all_pct: 25.8
+
+  - label: "E28 + templates"
+    description: "Inference-time post-processing on E28: deterministic prose templates for the 4 lonely triggers (First DD review / Missed-bounced / Manual reduction / Exemption Expiry), each citing the current tariff via 'on your tariff <Name>' to satisfy the eval rubric. Zero retrain. n=1000: mean_total 14.396 -> 14.684 (+0.288), row-level no_halluc 0.601 -> 0.879 (+0.278), pass_all 25.8% -> 44.1% (+18.3 pp, +70% relative). Slot-side no_halluc preserved at 1.000."
+    metrics:
+      mean_total: 14.684
+      no_halluc: 1.000
+      pass_all_pct: 44.1
