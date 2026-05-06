@@ -143,3 +143,10 @@ milestones:
       mean_total: 15.634
       no_halluc: 1.000
       pass_all_pct: 69.1
+
+  - label: "+ well_formed fix"
+    description: "Same E28+v5+templates+No-triggers eval, rescored with decimal-aware sentence splitter. The well_formed rubric was counting decimal periods inside numbers ('£174.64' / '12.38%') as sentence boundaries, inflating sentence counts from 3 to 5 and failing 285 rows on 'Change in usage'/'Change in unit rates' trigger combos. Regex change [.!?]+ -> [.!?]+(?=\\s|$). Pure rubric correction, same completions. mean_total 15.634 -> 15.897 (+0.263). well_formed mean 0.237 -> 0.500 (perfect). pass_all_pct 69.1% -> 97.7% (+28.6 pp, 977/1000 rows). vs PR-F champion (14.014): +1.883 mean_total, ~8.4x pass_all."
+    metrics:
+      mean_total: 15.897
+      no_halluc: 1.000
+      pass_all_pct: 97.7

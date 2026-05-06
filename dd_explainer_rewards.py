@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-05-06-tariff-regex-accepts-digit-first"
+RUBRIC_VERSION = "2026-05-06-well-formed-decimal-aware-split"
 
 # Reverted to the uncapped rubric (matching E1 champion) for the data-regen
 # experiment. Rationale: E14 showed that capping the no_halluc penalty makes
@@ -454,18 +454,21 @@ def reward_underpayment_language_constrained(completions, input_json, **kwargs) 
 # =============================================================================
 
 
-_SENTENCE_SPLIT_RE = re.compile(r"[.!?]+")
+# Match sentence-ending punctuation only — i.e. a period/!/? followed by
+# whitespace or end-of-string. Skips decimals like "£174.64" / "12.38%" and
+# date/version literals like "v2.5" that previously inflated sentence counts.
+# Without the lookahead, the n=1000 E28+v5+all eval scored 285 rows with 5
+# "sentences" purely because their prose cited £-amounts and %-amounts; real
+# sentence count was 3. Bug confirmed by inspecting full prose ending cleanly
+# at 3 periods + whitespace.
+_SENTENCE_SPLIT_RE = re.compile(r"[.!?]+(?=\s|$)")
 
 
 def _explanation_well_formed(e) -> bool:
     """Per-explanation predicate: header ≤ 10 words AND 1-4 sentences.
 
-    Length cap relaxed from 3 → 4 sentences (PR-F, 2026-05-05). Diagnostic on
-    cached PR-E n=1000 showed 24.7% of explanations failed by exactly one
-    sentence (188 4-sentence explanations) — a fine length for a customer-
-    facing explainer card. The 6-sentence cluster (218 explanations on certain
-    trigger types) still fails as intended; this only reclaims the off-by-one
-    band.
+    Length cap relaxed from 3 → 4 sentences (PR-F, 2026-05-05). Decimal-aware
+    sentence splitter (2026-05-06) — see `_SENTENCE_SPLIT_RE` comment.
     """
     if len(e.header.split()) > 10:
         return False

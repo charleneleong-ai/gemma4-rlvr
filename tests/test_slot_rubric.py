@@ -118,6 +118,68 @@ def test_digit_first_tariff_name_satisfies_regex():
     assert s["no_hallucinated_facts"] == 1.0
 
 
+def test_well_formed_does_not_count_decimal_periods_as_sentences():
+    """2026-05-06 rubric bump: decimal-period-aware sentence splitter.
+
+    Pre-fix, the n=1000 E28+v5+all eval scored 285 rows with 5 'sentences'
+    purely because their prose cited '£174.64' / '12.38%' / dates etc. — the
+    decimal point in the number was matching `[.!?]+`. True sentence count
+    was 3 (prose ended cleanly at 3 periods + whitespace).
+
+    After the fix, `_SENTENCE_SPLIT_RE` requires the period to be followed
+    by whitespace or end-of-string, skipping decimals.
+    """
+    inp = {
+        "account_context": {
+            "contract_history": [{
+                "tariff_name": "Better Energy Fixed",
+                "contract_rates_history": [
+                    {"rates": [{"change_since_previous_rate_percent": -3.7}]}
+                ],
+            }],
+        },
+        "latest_dd_change": {"dd_amount": 100.0, "dd_amount_change": 10.0},
+    }
+    # 3 real sentences, but contains decimal numbers that previously inflated
+    # the sentence count to 5 (counting "64" and "73%" as sentences).
+    real_3_sentence_prose = (
+        "Your Direct Debit has been adjusted because of changes in the unit "
+        "rates for your tariff Better Energy Fixed. Specifically, the "
+        "electricity unit rate saw a change of -3.73% since the last review. "
+        "This change resulted in the new DD amount being lower than the "
+        "previous amount of £60.29."
+    )
+    c = json.dumps({"explanations": [{
+        "trigger": "Change in unit rates",
+        "header": "Energy price adjustments applied",
+        "explanation": real_3_sentence_prose,
+    }]})
+    s = score_completion(c, ["Change in unit rates"], inp)
+    # 3 real sentences is within the 1-4 cap → well_formed = +0.5 (full pass)
+    assert s["well_formed"] == 0.5
+
+
+def test_well_formed_still_catches_genuinely_long_prose():
+    """Sanity: the decimal-aware splitter still rejects prose that's actually
+    too long. 5 real sentences (each ending with period+space) → fail."""
+    inp = {
+        "account_context": {"contract_history": [{"tariff_name": "Simply Fixed"}]},
+        "latest_dd_change": {"dd_amount": 100.0, "dd_amount_change": 0.0},
+    }
+    five_sentences = (
+        "Sentence one ends here. Sentence two follows. Sentence three is also here. "
+        "Sentence four arrives. Sentence five wraps it up."
+    )
+    c = json.dumps({"explanations": [{
+        "trigger": "Change in usage",
+        "header": "Five-sentence test",
+        "explanation": five_sentences,
+    }]})
+    s = score_completion(c, ["Change in usage"], inp)
+    # 5 real sentences > 4 cap → well_formed = -0.5
+    assert s["well_formed"] == -0.5
+
+
 def test_digit_first_tariff_invalid_still_caught():
     """Sanity: the regex change accepts the FORM of a digit-first name but
     still rejects names not in the input. '9-Year Fake' isn't a real tariff —
