@@ -150,3 +150,10 @@ milestones:
       mean_total: 15.897
       no_halluc: 1.000
       pass_all_pct: 97.7
+
+  - label: "+ trigger backfill (gated)"
+    description: "Inference-time post-processing: detect Stage-1-predicted triggers absent from the LLM's output and append a templated explanation entry for each. Gated on Stage-1 v5 sigmoid prob >= 0.9 to guard against false positives. Reuses the lonely-trigger renderers; no GPU, no retrain. Pure rescore on the same E28+v5+all per_row dump. Closes 14/23 residual f1<10 failures (all 'metadata trigger dropped when paired with salient trigger' pattern). Remaining 9 failures drop 'Change in usage'/'Change in unit rates' which have no renderer in the lonely-trigger set. mean_total 15.897 -> 15.967 (+0.070). f1_triggers 9.897 -> 9.967. pass_all_pct 97.7% -> 99.1% (+1.4 pp, 991/1000 rows). vs PR-F champion (14.014): +1.953 mean_total, ~8.5x pass_all."
+    metrics:
+      mean_total: 15.967
+      no_halluc: 1.000
+      pass_all_pct: 99.1
