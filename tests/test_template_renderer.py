@@ -11,6 +11,7 @@ import pytest
 
 from dd_explainer_template_renderer import (
     LONELY_TRIGGERS,
+    NO_TRIGGERS_LABEL,
     overwrite_explanations,
     render_lonely_explanation,
 )
@@ -180,6 +181,30 @@ def test_exemption_expiry_handles_missing_fields():
     assert "exemption" in out["explanation"].lower()
     # No invented £ amounts
     assert "£" not in out["explanation"]
+
+
+def test_no_triggers_identified_renders_with_tariff():
+    out = render_lonely_explanation(
+        NO_TRIGGERS_LABEL,
+        grounding={},  # Stage-1 said nothing applies, so no grounding
+        valid_facts={"tariffs": ["Simpler Energy"], "prev_amount": 90.0},
+    )
+    assert out is not None
+    # Must mention the tariff via "tariff <Name>" so _TARIFF_RE picks it up
+    assert "tariff Simpler Energy" in out["explanation"]
+    # Must mention the prev amount
+    assert "£90.00" in out["explanation"]
+
+
+def test_no_triggers_identified_returns_none_without_tariff():
+    """When there's no tariff to cite, the template can't escape the inaction
+    loophole — better to fall through to LLM than emit prose with no anchors."""
+    out = render_lonely_explanation(
+        NO_TRIGGERS_LABEL,
+        grounding={},
+        valid_facts={"tariffs": [], "prev_amount": None},
+    )
+    assert out is None
 
 
 def test_overwrite_explanations_replaces_lonely_keeps_slots():
