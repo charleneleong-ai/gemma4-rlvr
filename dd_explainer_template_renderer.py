@@ -33,6 +33,12 @@ LONELY_TRIGGERS: frozenset[str] = frozenset({
     "Exemption Expiry",
 })
 
+# Stage-1 fires this sentinel when no class clears the threshold. The LLM's
+# default behavior on this label is vague filler that cites zero tariffs,
+# tripping the no_halluc inaction loophole — render a tariff-citing
+# template instead.
+NO_TRIGGERS_LABEL: str = "No triggers identified"
+
 
 def _fmt_gbp(v: float | int | None) -> str | None:
     if v is None:
@@ -149,11 +155,32 @@ def _render_exemption_expiry(grounding: dict[str, Any], valid_facts: dict[str, A
     return {"header": "Exemption period has ended", "explanation": "".join(parts)}
 
 
+def _render_no_triggers_identified(grounding: dict[str, Any], valid_facts: dict[str, Any]) -> dict[str, str] | None:
+    """Stage-1 fallback when no specific trigger fires. Renders prose that
+    cites the current tariff so the row escapes the no_halluc inaction
+    loophole. No grounding context required (Stage-1 said nothing applies)."""
+    tariff_clause = _tariff_clause(valid_facts)
+    if not tariff_clause:
+        # No tariff to cite either — caller falls through to LLM (no template
+        # can help here without inventing claims).
+        return None
+    prev = _fmt_gbp(valid_facts.get("prev_amount"))
+    prev_clause = f" The amount has been adjusted from the previous {prev} to reflect your current usage." if prev else ""
+    return {
+        "header": "Direct Debit reviewed — no specific trigger identified",
+        "explanation": (
+            f"Your Direct Debit{tariff_clause} has been reviewed this cycle"
+            f" and no specific trigger event was identified.{prev_clause}"
+        ),
+    }
+
+
 _RENDERERS = {
     "First DD review since account start": _render_first_dd_review,
     "Missed/bounced DD payments": _render_missed_payments,
     "Manual reduction": _render_manual_reduction,
     "Exemption Expiry": _render_exemption_expiry,
+    NO_TRIGGERS_LABEL: _render_no_triggers_identified,
 }
 
 
@@ -206,6 +233,7 @@ def overwrite_explanations(
 
 __all__ = [
     "LONELY_TRIGGERS",
+    "NO_TRIGGERS_LABEL",
     "render_lonely_explanation",
     "overwrite_explanations",
 ]

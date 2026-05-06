@@ -69,6 +69,14 @@ CLASSIFIER_EXTRA_FEATURE_NAMES = (
     "older_change_exemption_expired",         # → Exemption Expiry
     "abs_electricity_change_percent",         # → Change in usage
     "abs_gas_change_percent",                 # → Change in usage
+    # v5 (2026-05-06): add features for the 3 triggers that previously had
+    # NO discriminator — Missed/bounced, First DD review, Change in unit rates.
+    # The E28 + templates retrospective showed these dragged f1 down (745/1000
+    # perfect, with 3-trigger combos missing 35-65%). All four predicates are
+    # 100% recall / 0% FPR derivable from input fields.
+    "n_failed_payments",                      # → Missed/bounced DD payments
+    "is_first_dd_review",                     # → First DD review since account start
+    "max_abs_rate_change_percent",            # → Change in unit rates (>= 1% magnitude)
 )
 
 
@@ -99,6 +107,22 @@ def _extract_classifier_extra_features(input_json: dict[str, Any]) -> list[float
     elec = (pch.get("electricity") or {}).get("change_percent") or 0.0
     gas = (pch.get("gas") or {}).get("change_percent") or 0.0
 
+    # v5 features
+    pay = ac.get("payment_history") or []
+    n_failed = sum(1 for p in pay if not p.get("is_payment_successful", True))
+    # First DD review = only one entry in dd_change_history (no priors)
+    is_first_dd_review = len(dd_history) <= 1
+    # Max abs rate change % across contract_history.contract_rates_history.rates
+    max_abs_rate = 0.0
+    for ch in (ac.get("contract_history") or []):
+        for rh in (ch.get("contract_rates_history") or []):
+            for rate in (rh.get("rates") or []):
+                v = rate.get("change_since_previous_rate_percent")
+                if v is not None:
+                    a = abs(float(v))
+                    if a > max_abs_rate:
+                        max_abs_rate = a
+
     return [
         1.0 if is_manual else 0.0,
         1.0 if is_customer_request else 0.0,
@@ -106,6 +130,9 @@ def _extract_classifier_extra_features(input_json: dict[str, Any]) -> list[float
         1.0 if exemption_expired else 0.0,
         abs(float(elec)),
         abs(float(gas)),
+        float(n_failed),
+        1.0 if is_first_dd_review else 0.0,
+        float(max_abs_rate),
     ]
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)

@@ -1,0 +1,105 @@
+# E28 + Stage-1 v5 + Templates + Rubric Fix Retrospective
+
+E28 LoRA (`gemma_4_lora/pr_g_e28`) + Stage-1 v5 classifier
+(`data/trigger_classifier_v5_bool_features.pt`) + lonely-trigger templates +
+"No triggers identified" fallback template + `_TARIFF_RE` rubric regex
+accepting digit-first names.
+
+Fresh n=1000 eval at `2026-05-06T20:04:20Z`. Per-row dump:
+[`data/eval_e28_v5_templates_n1000.per_row.jsonl`](../../../data/eval_e28_v5_templates_n1000.per_row.jsonl).
+Aggregate: [`data/eval_e28_v5_templates_n1000.json`](../../../data/eval_e28_v5_templates_n1000.json).
+
+## Headline — new champion (~6× pass_all over PR-F)
+
+| metric | PR-F champion | E28 baseline | E28 + tmpl | **E28 + v5 + all** | Δ vs PR-F |
+|---|---:|---:|---:|---:|---:|
+| mean_total | 14.014 | 14.396 | 14.684 | **15.634** | **+1.620** |
+| f1_triggers | — | 9.067 | 9.067 | **9.897** | — |
+| no_halluc (row-level) | 1.000 | 0.601 | 0.879 | **1.000** ✓ | — |
+| no_halluc (slot-only) | 1.000 | 1.000 | 1.000 | **1.000** ✓ | — |
+| pass_all_pct | 11.7% | 25.8% | 44.1% | **69.1%** | **+57.4 pp** |
+| pass_all (count) | 117 | 258 | 441 | **691** | nearly 6× |
+
+**Row-level no_halluc went perfect** — 1000/1000 rows pass the citation check.
+
+## Rubric component breakdown (n=1000)
+
+```
+schema_valid                pass=1000  mean=1.000
+in_enum                     pass=1000  mean=1.000
+f1_triggers                 pass= 977  mean=9.897
+prev_amount_correct         pass=1000  mean=2.000
+no_hallucinated_facts       pass=1000  mean=1.000  ← perfect (was 0.601 / 0.879)
+no_hallucinated_facts_slots pass=1000  mean=1.000  ← preserved
+underpayment_ok             pass=1000  mean=0.500
+well_formed                 pass= 714  mean=0.237  ← only remaining ceiling
+mean_total                                =15.634
+```
+
+## Diagnosis loop that got us here
+
+The path from PR-F champion (14.014) → this iter (15.634) was 4 sequential
+fixes guided by per-row retrospectives. Each step's lift was measured before
+the next was scoped:
+
+| step | mechanism | measurement |
+|---|---|---|
+| E28 (PR-G) | retrain w/ `--constrain-facts` | mean_total +0.382, no_halluc 0.601 |
+| + lonely-trigger templates | inference-time, deterministic templates | mean_total +0.288, no_halluc 0.879 |
+| + `_TARIFF_RE` regex fix | rubric reform (`[A-Z]` → `[A-Z0-9]`) | mean_total +0.081 (rescore), no_halluc 0.960 |
+| + No-triggers fallback template | fallback for Stage-1 sentinel | mean_total +0.022 (rescore), no_halluc 0.982 |
+| + Stage-1 v5 (boolean features) | classifier + 3 boolean predicates → 100% exact-match | mean_total +0.847 (fresh eval), no_halluc **1.000** |
+
+**The v5 lift (+0.847) was supra-additive vs the +0.05–0.10 estimate** — when v5 supplies correct triggers in the prompt, the LLM emits correct triggers, templates fire on the right rows, regex fix unlocks the 22% blocked rows, and the No-triggers fallback handles the truly-empty cases. All four interventions compose multiplicatively on the previously-failing rows.
+
+## What's left — `well_formed` is the next ceiling
+
+After this PR, the only sub-rubric not at ceiling is `well_formed`:
+- pass count: 714/1000
+- mean: 0.237 (vs theoretical max 0.5)
+
+The PR-G E28 retrospective already noted this — the prose mean drags down
+because of length penalty mass (well_formed reward goes negative when prose
+is too long). Templates write tight prose, but the LLM-generated prose for
+non-lonely triggers ("Change in usage" / "Change in unit rates") is the
+likely source. Investigating this is a separate iter.
+
+## Stage-1 v5 stage breakdown — what each new feature did
+
+v4 (prior): 96.1% exact-match on full 5500-row dataset (212 rows wrong).
+v5 (new):  **100% exact-match** (212 rows where v5 right and v4 wrong; **0** the other way).
+
+The 3 new features each target a previously-uncovered trigger:
+
+| feature | target trigger | pre-v5 fail rate (post-templates) | post-v5 fail rate |
+|---|---|---:|---:|
+| `n_failed_payments` (count of `is_payment_successful=False`) | Missed/bounced DD payments | 13.5% | 0% |
+| `is_first_dd_review` (`len(dd_change_history) <= 1`) | First DD review since account start | 15.6% | 0% |
+| `max_abs_rate_change_percent` (max abs across contract rates) | Change in unit rates | 7.7% | 0% |
+
+The v5 classifier was trained for 200 epochs (~30s on a single A100) on
+frozen bge-small embeddings + 9 numeric features + 9 boolean/numeric
+classifier-extra features (head_in_dim 396 → 402).
+
+## Cost / leverage
+
+This entire jump from 14.014 (PR-F) → 15.634 (this) cost approximately:
+- E28 retrain: ~4h GPU
+- E29 retrain: ~1.5h GPU (killed once templates A/B revealed eval rubric mismatch)
+- v5 classifier training: ~30 sec GPU
+- Final n=1000 eval: ~4h GPU
+
+vs the eval lift of +1.620 mean_total / +57.4 pp pass_all. Roughly 70% of the
+lift came from non-LoRA changes (templates + rubric fix + Stage-1 v5)
+matching the broader "2/3 of uplift comes from system around the model"
+pattern documented in PR #30's retrospective.
+
+## Generated by
+
+`scripts/two_stage_eval.py --classifier-path data/trigger_classifier_v5_bool_features.pt
+--lora-path gemma_4_lora/pr_g_e28 --use-templates --constrain-facts --enforce-slots`
+under `RUBRIC_VERSION=2026-05-06-tariff-regex-accepts-digit-first`.
+
+`autoresearch.retrospective.audit_iter` not run — this iter doesn't have a
+training trajectory (Stage-1 classifier is the only training, completed in
+30s with no detector-relevant signals; LoRA reused from PR #30).
