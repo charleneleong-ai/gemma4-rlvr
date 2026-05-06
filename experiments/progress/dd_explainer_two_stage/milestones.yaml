@@ -122,3 +122,10 @@ milestones:
       mean_total: 14.014
       no_halluc: 1.000
       pass_all_pct: 11.7
+
+  - label: "PR-G E28 (constrain-facts)"
+    description: "PR-G GRPO retrain warm-started from E27 with --constrain-facts (eval-matching VALID FACTS prompt block) + v4 MLP + LMFE slots (n=1000). New SOTA on mean_total + pass_all (more than 2x); slot-side no_halluc still perfect (1.000), but row-level no_halluc drops to 0.601 — extra prose around slots introduces unsupported claims in 39.9% of rows."
+    metrics:
+      mean_total: 14.396
+      no_halluc: 1.000
+      pass_all_pct: 25.8
