@@ -1,0 +1,60 @@
+{
+  "rubric_version": "2026-05-06-tariff-regex-accepts-digit-first",
+  "n_heldout": 1000,
+  "classifier_path": "data/trigger_classifier_v5_bool_features.pt",
+  "lora_path": "gemma_4_lora/pr_g_e28",
+  "constrain_facts": true,
+  "enforce_slots": true,
+  "use_templates": true,
+  "stage1_trigger_distribution": {
+    "Exemption Expiry": 268,
+    "Missed/bounced DD payments": 326,
+    "Manual reduction": 263,
+    "First DD review since account start": 192,
+    "Change in usage": 436,
+    "Change in unit rates": 358,
+    "No triggers identified": 24
+  },
+  "stage1_multi_trigger_rate": 0.545,
+  "two_stage": {
+    "n": 1000,
+    "pass_all": 691,
+    "pass_all_pct": 69.1,
+    "pass_thresholds": {
+      "schema_valid": 1.0,
+      "in_enum": 1.0,
+      "f1_triggers": 10.0,
+      "prev_amount_correct": 0.0,
+      "no_hallucinated_facts": 1.0,
+      "underpayment_ok": 0.5,
+      "well_formed": 0.5
+    },
+    "rubric_version": "2026-05-06-tariff-regex-accepts-digit-first",
+    "schema_valid_pass": 1000,
+    "schema_valid_mean": 1.0,
+    "in_enum_pass": 1000,
+    "in_enum_mean": 1.0,
+    "f1_triggers_pass": 977,
+    "f1_triggers_mean": 9.897,
+    "prev_amount_correct_pass": 1000,
+    "prev_amount_correct_mean": 2.0,
+    "no_hallucinated_facts_pass": 1000,
+    "no_hallucinated_facts_mean": 1.0,
+    "underpayment_ok_pass": 1000,
+    "underpayment_ok_mean": 0.5,
+    "well_formed_pass": 714,
+    "well_formed_mean": 0.237,
+    "mean_total": 15.634,
+    "no_hallucinated_facts_slots_mean": 1.0
+  },
+  "gpu": {
+    "mean_util_pct": 22.496463932107496,
+    "peak_util_pct": 100,
+    "peak_mem_gb": 25.42,
+    "mem_total_gb": 40.0,
+    "runtime_s": 14331.059127203887,
+    "hints": [
+      "Compute underused (mean 22%) \u2014 possible: dataloader bottleneck / small batch / sequential gen / pipe-bound"
+    ]
+  }
+}

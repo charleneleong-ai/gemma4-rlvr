@@ -136,3 +136,10 @@ milestones:
       mean_total: 14.684
       no_halluc: 1.000
       pass_all_pct: 44.1
+
+  - label: "E28 + v5 + all"
+    description: "E28 LoRA + Stage-1 v5 (3 new boolean predicate features: n_failed_payments, is_first_dd_review, max_abs_rate_change_pct -> 100% exact-match) + lonely-trigger templates + No-triggers-identified fallback template + _TARIFF_RE rubric regex accepts digit-first names. Fresh n=1000 eval. mean_total 14.014 (PR-F) -> 14.396 (E28) -> 14.684 (templates) -> 15.634 (+1.620 over PR-F). Row-level no_halluc 0.601 -> 1.000 (perfect, 1000/1000). pass_all 11.7% (PR-F) -> 69.1% (~6x PR-F). f1_triggers 9.067 -> 9.897 (977/1000 perfect)."
+    metrics:
+      mean_total: 15.634
+      no_halluc: 1.000
+      pass_all_pct: 69.1
