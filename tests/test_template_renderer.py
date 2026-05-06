@@ -12,6 +12,7 @@ import pytest
 from dd_explainer_template_renderer import (
     LONELY_TRIGGERS,
     NO_TRIGGERS_LABEL,
+    backfill_missing_triggers,
     overwrite_explanations,
     render_lonely_explanation,
 )
@@ -250,3 +251,203 @@ def test_overwrite_explanations_handles_malformed_gracefully():
     # Non-dict entries skipped
     out = overwrite_explanations({"explanations": [None, "x", {"trigger": "Change in usage"}]}, {}, {})
     assert out["explanations"][:2] == [None, "x"]
+
+
+# --------------------------------------------------------------------------
+# backfill_missing_triggers
+# --------------------------------------------------------------------------
+
+
+def _grounding_with_first_dd_review() -> dict:
+    return {"first_dd_review": {"is_first": True, "n_prior_dd_entries": 0}}
+
+
+def _valid_facts_simpler() -> dict:
+    return {
+        "tariffs": ["Simpler Energy"],
+        "rate_percentages": [],
+        "prev_amount": 82.75,
+    }
+
+
+def test_backfill_no_op_when_no_trigger_missing():
+    parsed = {"explanations": [
+        {"trigger": "Change in usage", "header": "h", "explanation": "e",
+         "tariff_cited": "Simpler Energy", "rate_change_pct_cited": 0.0,
+         "prev_amount_cited": 82.75},
+    ]}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["Change in usage"],
+        stage1_probs={"Change in usage": 0.99},
+        grounding={},
+        valid_facts=_valid_facts_simpler(),
+    )
+    assert len(out["explanations"]) == 1
+
+
+def test_backfill_appends_missing_trigger_with_complete_slots():
+    parsed = {"explanations": [
+        {"trigger": "Change in usage", "header": "h", "explanation": "e",
+         "tariff_cited": "Simpler Energy", "rate_change_pct_cited": 0.0,
+         "prev_amount_cited": 82.75},
+    ]}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["Change in usage", "First DD review since account start"],
+        stage1_probs={"Change in usage": 0.99,
+                      "First DD review since account start": 0.95},
+        grounding=_grounding_with_first_dd_review(),
+        valid_facts=_valid_facts_simpler(),
+    )
+    assert len(out["explanations"]) == 2
+    appended = out["explanations"][1]
+    assert appended["trigger"] == "First DD review since account start"
+    assert appended["header"] == "First Direct Debit review since account start"
+    assert "first review" in appended["explanation"].lower()
+    # Slot fields populated from valid_facts so the rubric scores them.
+    assert appended["tariff_cited"] == "Simpler Energy"
+    assert appended["prev_amount_cited"] == 82.75
+    assert appended["rate_change_pct_cited"] == 0.0
+    # Existing entry untouched.
+    assert out["explanations"][0]["trigger"] == "Change in usage"
+
+
+def test_backfill_gate_blocks_low_confidence_predictions():
+    parsed = {"explanations": []}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["First DD review since account start"],
+        stage1_probs={"First DD review since account start": 0.5},
+        grounding=_grounding_with_first_dd_review(),
+        valid_facts=_valid_facts_simpler(),
+        confidence_threshold=0.9,
+    )
+    # Below threshold → no backfill.
+    assert out["explanations"] == []
+
+
+def test_backfill_gate_threshold_boundary_inclusive():
+    parsed = {"explanations": []}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["First DD review since account start"],
+        stage1_probs={"First DD review since account start": 0.9},
+        grounding=_grounding_with_first_dd_review(),
+        valid_facts=_valid_facts_simpler(),
+        confidence_threshold=0.9,
+    )
+    # prob == threshold → backfilled (>=).
+    assert len(out["explanations"]) == 1
+
+
+def test_backfill_skips_when_renderer_unavailable():
+    # "Change in usage" has no renderer in the lonely set.
+    parsed = {"explanations": []}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["Change in usage"],
+        stage1_probs={"Change in usage": 0.99},
+        grounding={},
+        valid_facts=_valid_facts_simpler(),
+    )
+    assert out["explanations"] == []
+
+
+def test_backfill_skips_when_grounding_missing():
+    # Renderer for First DD review needs grounding.first_dd_review.is_first.
+    parsed = {"explanations": []}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["First DD review since account start"],
+        stage1_probs={"First DD review since account start": 0.99},
+        grounding={},  # no first_dd_review key
+        valid_facts=_valid_facts_simpler(),
+    )
+    assert out["explanations"] == []
+
+
+def test_backfill_probs_none_bypasses_gate():
+    parsed = {"explanations": []}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["First DD review since account start"],
+        stage1_probs=None,
+        grounding=_grounding_with_first_dd_review(),
+        valid_facts=_valid_facts_simpler(),
+    )
+    assert len(out["explanations"]) == 1
+
+
+def test_backfill_appends_multiple_missing_triggers():
+    parsed = {"explanations": []}
+    grounding = {
+        "first_dd_review": {"is_first": True, "n_prior_dd_entries": 0},
+        "missed_payments": {
+            "n_missed": 2,
+            "most_recent_period": "2025-09",
+            "most_recent_amount_gbp": 60.0,
+        },
+    }
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=[
+            "First DD review since account start",
+            "Missed/bounced DD payments",
+        ],
+        stage1_probs={
+            "First DD review since account start": 0.99,
+            "Missed/bounced DD payments": 0.99,
+        },
+        grounding=grounding,
+        valid_facts=_valid_facts_simpler(),
+    )
+    triggers = [e["trigger"] for e in out["explanations"]]
+    assert triggers == [
+        "First DD review since account start",
+        "Missed/bounced DD payments",
+    ]
+
+
+def test_backfill_idempotent():
+    parsed = {"explanations": []}
+    args = dict(
+        stage1_triggers=["First DD review since account start"],
+        stage1_probs={"First DD review since account start": 0.99},
+        grounding=_grounding_with_first_dd_review(),
+        valid_facts=_valid_facts_simpler(),
+    )
+    backfill_missing_triggers(parsed, **args)
+    backfill_missing_triggers(parsed, **args)
+    # Second call should not duplicate.
+    assert len(parsed["explanations"]) == 1
+
+
+def test_backfill_handles_malformed_parsed():
+    # No explanations key.
+    assert backfill_missing_triggers({}, [], None, {}, {}) == {}
+    # Non-list explanations.
+    bad = {"explanations": "oops"}
+    assert backfill_missing_triggers(bad, [], None, {}, {})["explanations"] == "oops"
+
+
+def test_backfill_no_stage1_triggers_is_no_op():
+    parsed = {"explanations": []}
+    out = backfill_missing_triggers(parsed, [], {}, {}, _valid_facts_simpler())
+    assert out["explanations"] == []
+
+
+def test_backfill_handles_missing_tariff_in_valid_facts():
+    parsed = {"explanations": []}
+    out = backfill_missing_triggers(
+        parsed,
+        stage1_triggers=["First DD review since account start"],
+        stage1_probs={"First DD review since account start": 0.99},
+        grounding=_grounding_with_first_dd_review(),
+        valid_facts={"tariffs": [], "rate_percentages": [], "prev_amount": 50.0},
+    )
+    # Renderer returns prose without tariff_clause; backfill still appends with
+    # tariff_cited="" so the entry is well-formed.
+    assert len(out["explanations"]) == 1
+    assert out["explanations"][0]["tariff_cited"] == ""
+    assert out["explanations"][0]["prev_amount_cited"] == 50.0

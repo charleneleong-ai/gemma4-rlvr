@@ -231,9 +231,90 @@ def overwrite_explanations(
     return parsed
 
 
+def _build_backfill_entry(
+    trigger: str,
+    rendered: dict[str, str],
+    valid_facts: dict[str, Any],
+) -> dict[str, Any]:
+    """Construct a complete explanations[] entry from a rendered template,
+    populating the three slot citation fields from `valid_facts` so the
+    backfilled entry is rubric-complete by construction."""
+    tariff = _current_tariff(valid_facts) or ""
+    prev = valid_facts.get("prev_amount")
+    return {
+        "trigger": trigger,
+        "header": rendered["header"],
+        "explanation": rendered["explanation"],
+        "tariff_cited": tariff,
+        "rate_change_pct_cited": 0.0,
+        "prev_amount_cited": float(prev) if prev is not None else 0.0,
+    }
+
+
+def backfill_missing_triggers(
+    parsed: dict[str, Any],
+    stage1_triggers: list[str],
+    stage1_probs: dict[str, float] | None,
+    grounding: dict[str, Any],
+    valid_facts: dict[str, Any],
+    confidence_threshold: float = 0.9,
+) -> dict[str, Any]:
+    """Append a templated entry for each Stage-1-predicted trigger absent
+    from `parsed["explanations"]`, gated on classifier confidence.
+
+    The PR #32 ceiling analysis showed the residual 23/1000 failures are
+    exclusively "Stage-1 right, LLM dropped a trigger" (f1=6 instead of
+    f1=10). The LLM tends to drop low-salience metadata triggers (e.g.
+    "First DD review since account start") when paired with high-salience
+    triggers (e.g. "Change in usage"). Backfilling restores f1 to 10 and
+    pushes pass_all toward the rubric ceiling.
+
+    Args:
+        parsed: parsed two_stage completion JSON, mutated in place.
+        stage1_triggers: trigger labels predicted by the Stage-1 classifier
+            for this row.
+        stage1_probs: per-trigger sigmoid probabilities from the classifier.
+            If None the gate is bypassed (legacy callers). Production code
+            should always pass probs to guard against Stage-1 false-positives
+            being forced into the output.
+        grounding: extract_trigger_grounding(input_json) — supplies the
+            per-trigger anchors the renderer needs.
+        valid_facts: extract_valid_facts(input_json) — supplies tariff and
+            prev_amount used for slot citations.
+        confidence_threshold: only backfill triggers whose Stage-1 prob is
+            at least this. 0.9 is a conservative default tuned against
+            v5's well-calibrated boolean-feature predictions.
+
+    Returns the same dict (for fluent use). No-op when `parsed` has no
+    `explanations` list, when no Stage-1 trigger is missing, or when no
+    renderer/grounding is available for the missing triggers.
+    """
+    explanations = parsed.get("explanations")
+    if not isinstance(explanations, list):
+        return parsed
+    emitted: set[str] = {
+        e["trigger"] for e in explanations
+        if isinstance(e, dict) and isinstance(e.get("trigger"), str)
+    }
+    for trigger in stage1_triggers:
+        if trigger in emitted:
+            continue
+        if stage1_probs is not None:
+            prob = stage1_probs.get(trigger, 0.0)
+            if prob < confidence_threshold:
+                continue
+        rendered = render_lonely_explanation(trigger, grounding, valid_facts)
+        if rendered is None:
+            continue
+        explanations.append(_build_backfill_entry(trigger, rendered, valid_facts))
+        emitted.add(trigger)
+    return parsed
+
+
 __all__ = [
     "LONELY_TRIGGERS",
     "NO_TRIGGERS_LABEL",
     "render_lonely_explanation",
     "overwrite_explanations",
+    "backfill_missing_triggers",
 ]
