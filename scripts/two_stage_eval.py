@@ -58,7 +58,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from autoresearch import GPUMonitor  # noqa: E402
 
 from dd_explainer_rewards import RUBRIC_VERSION, score_completion  # noqa: E402
-from dd_explainer_template_renderer import overwrite_explanations  # noqa: E402
+from dd_explainer_template_renderer import (  # noqa: E402
+    backfill_missing_triggers,
+    overwrite_explanations,
+)
 from dd_explainer_two_stage import (  # noqa: E402
     TwoStageClassifier,
     build_two_stage_prompt,
@@ -357,6 +360,9 @@ def _rescore_from_per_row(
     out: Path,
     *,
     use_templates: bool = False,
+    backfill_triggers: bool = False,
+    stage1_probs_path: Optional[Path] = None,
+    backfill_threshold: float = 0.9,
     wandb_log: bool = False,
     wandb_project: str = "gemma4-rlvr-eval",
     wandb_run_name: Optional[str] = None,
@@ -366,8 +372,12 @@ def _rescore_from_per_row(
 
     If `use_templates` is set, post-processes each completion through
     `overwrite_explanations` (lonely-trigger templates) before scoring.
-    Original completions are preserved in the output's `completions` field;
-    `templated_completions` is written alongside when templates were applied.
+
+    If `backfill_triggers` is set, additionally appends a templated entry
+    for every Stage-1-predicted trigger missing from the LLM's output.
+    Gated on classifier confidence when `stage1_probs_path` is provided
+    (recommended for production); ungated when omitted (rescore-only mode
+    that trusts a 100%-exact-match Stage-1).
     """
     rows = [json.loads(l) for l in per_row_path.read_text().splitlines() if l.strip()]
     if not rows:
@@ -378,31 +388,64 @@ def _rescore_from_per_row(
             "Re-generate with the current script to enable rescore."
         )
     arm_names = sorted(rows[0]["completions"].keys())
+
+    stage1_probs_by_row: dict[str, dict[str, float]] | None = None
+    if backfill_triggers and stage1_probs_path is not None:
+        probs_payload = json.loads(stage1_probs_path.read_text())
+        stage1_probs_by_row = probs_payload.get("probabilities", probs_payload)
+        typer.echo(
+            f"loaded Stage-1 probs for {len(stage1_probs_by_row)} rows "
+            f"from {stage1_probs_path.name}"
+        )
+
     typer.echo(
         f"rescore mode: {len(rows)} rows × {len(arm_names)} arms ({arm_names}) "
         f"under rubric {RUBRIC_VERSION}"
         + (" + lonely-trigger templates" if use_templates else "")
+        + (
+            f" + backfill (gate>={backfill_threshold})"
+            if backfill_triggers and stage1_probs_by_row is not None
+            else " + backfill (UNGATED)" if backfill_triggers else ""
+        )
     )
     arm_aggregates: dict[str, dict] = {}
     rescored_rows: list[dict[str, Any]] = []
     n_overwritten = 0
+    n_backfilled = 0
     n_parse_failed = 0
     for i, r in enumerate(rows):
         new_scores: dict[str, dict[str, float]] = {}
         gt = sorted(r["ground_truth_triggers"])
         inp = r["input_json"]
+        stage1_triggers = r.get("stage1_triggers") or []
+        row_probs: dict[str, float] | None = None
+        if stage1_probs_by_row is not None:
+            row_probs = stage1_probs_by_row.get(str(r["i"]))
         for arm in arm_names:
             comp = r["completions"][arm]
-            if use_templates and arm != "vanilla":
+            if (use_templates or backfill_triggers) and arm != "vanilla":
                 grounding = extract_trigger_grounding(inp)
                 facts = extract_valid_facts(inp)
                 try:
                     parsed = json.loads(comp)
                     before = json.dumps(parsed, sort_keys=True)
-                    parsed = overwrite_explanations(parsed, grounding, facts)
-                    after = json.dumps(parsed, sort_keys=True)
-                    if before != after:
+                    if use_templates:
+                        parsed = overwrite_explanations(parsed, grounding, facts)
+                    after_overwrite = json.dumps(parsed, sort_keys=True)
+                    if before != after_overwrite:
                         n_overwritten += 1
+                    if backfill_triggers:
+                        n_before = len(parsed.get("explanations") or [])
+                        parsed = backfill_missing_triggers(
+                            parsed,
+                            stage1_triggers=stage1_triggers,
+                            stage1_probs=row_probs,
+                            grounding=grounding,
+                            valid_facts=facts,
+                            confidence_threshold=backfill_threshold,
+                        )
+                        if len(parsed.get("explanations") or []) > n_before:
+                            n_backfilled += 1
                     comp = json.dumps(parsed, indent=2)
                 except (json.JSONDecodeError, TypeError):
                     n_parse_failed += 1
@@ -413,6 +456,8 @@ def _rescore_from_per_row(
             f"  templates: overwrote {n_overwritten} arm-rows; "
             f"{n_parse_failed} json-parse failures"
         )
+    if backfill_triggers:
+        typer.echo(f"  backfill: appended trigger entries on {n_backfilled} arm-rows")
     for arm in arm_names:
         arm_aggregates[arm] = _aggregate_scores([r["scores"][arm] for r in rescored_rows])
 
@@ -505,6 +550,30 @@ def main(
         help="If set, skip the model and re-score completions from a previous "
              "<out>.per_row.jsonl under the current rubric. Cheap (~10s).",
     ),
+    backfill_triggers: bool = typer.Option(
+        False,
+        "--backfill-triggers/--no-backfill-triggers",
+        help="Append a templated explanation entry for every Stage-1-predicted "
+             "trigger missing from the LLM's output. Closes the residual "
+             "f1<10 failures where Stage-1 was right but the LLM dropped a "
+             "trigger. Gated on classifier confidence when --stage1-probs-path "
+             "is provided.",
+    ),
+    stage1_probs_path: Optional[Path] = typer.Option(
+        None,
+        "--stage1-probs-path",
+        help="Path to a JSON file mapping row-index -> {trigger: prob} from "
+             "the Stage-1 classifier. When set with --backfill-triggers, only "
+             "backfills triggers whose Stage-1 prob >= --backfill-threshold. "
+             "Strongly recommended for production to guard against Stage-1 "
+             "false-positives being forced into the output.",
+    ),
+    backfill_threshold: float = typer.Option(
+        0.9,
+        "--backfill-threshold",
+        help="Stage-1 classifier prob threshold for backfilling a trigger. "
+             "Only used when --stage1-probs-path is provided.",
+    ),
     save_logprobs: int = typer.Option(
         0,
         "--save-logprobs",
@@ -550,6 +619,9 @@ def main(
         _rescore_from_per_row(
             rescore_from, out,
             use_templates=use_templates,
+            backfill_triggers=backfill_triggers,
+            stage1_probs_path=stage1_probs_path,
+            backfill_threshold=backfill_threshold,
             wandb_log=wandb_log,
             wandb_project=wandb_project,
             wandb_run_name=wandb_run_name,
