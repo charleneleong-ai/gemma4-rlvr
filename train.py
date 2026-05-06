@@ -591,14 +591,21 @@ def _load_dataset(
     # If we have Stage 1 predictions, splice them into the prompt now.
     if stage1_predictions is not None:
         # Local — heavy import.
-        from dd_explainer_two_stage import build_two_stage_prompt, extract_valid_facts
+        from dd_explainer_two_stage import (
+            build_two_stage_prompt,
+            extract_trigger_grounding,
+            extract_valid_facts,
+        )
 
         def _inject_two_stage(row):
             triggers = stage1_predictions.get(str(row["row_index"]))
             if triggers:
                 facts = extract_valid_facts(row["input_json"]) if constrain_facts else None
+                grounding = extract_trigger_grounding(row["input_json"]) if constrain_facts else None
                 row["prompt"] = build_two_stage_prompt(
-                    row["prompt"], triggers, valid_facts=facts,
+                    row["prompt"], triggers,
+                    valid_facts=facts,
+                    trigger_grounding=grounding,
                 )
             return row
 

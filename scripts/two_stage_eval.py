@@ -61,6 +61,7 @@ from dd_explainer_rewards import RUBRIC_VERSION, score_completion  # noqa: E402
 from dd_explainer_two_stage import (  # noqa: E402
     TwoStageClassifier,
     build_two_stage_prompt,
+    extract_trigger_grounding,
     extract_valid_facts,
 )
 from dd_explainer_slot_decoder import (  # noqa: E402
@@ -135,8 +136,11 @@ def _run_arm(
                 facts = extract_valid_facts(inp)
                 chunk_facts.append(facts)
                 constrain_arg = facts if arm.constrain_facts else None
+                grounding_arg = extract_trigger_grounding(inp) if arm.constrain_facts else None
                 msg = build_two_stage_prompt(
-                    base, predicted_triggers[i], valid_facts=constrain_arg,
+                    base, predicted_triggers[i],
+                    valid_facts=constrain_arg,
+                    trigger_grounding=grounding_arg,
                 )
             else:
                 msg = base
