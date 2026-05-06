@@ -157,3 +157,10 @@ milestones:
       mean_total: 15.967
       no_halluc: 1.000
       pass_all_pct: 99.1
+
+  - label: "+ usage / unit-rate renderers"
+    description: "Add the two missing renderers (_render_change_in_usage / _render_change_in_unit_rates) so the gated backfill can close the residual 9 failures. Renderers cite only valid_facts entries (tariff name, rate_percentages with abs >= 1.0, prev_amount) — no usage % cited (avoids needing extra grounding extraction). Backfill registry split from overwrite registry so LLM prose for these triggers stays untouched on rows where the LLM emits them correctly. Pure rescore on E28+v5+all per_row dump. Closes ALL residual failures: 23 backfill events on 1000 rows, every row passes every gate. mean_total 15.967 -> 16.000 (+0.033, ceiling). f1_triggers 9.967 -> 10.000. pass_all_pct 99.1% -> 100.0% (+0.9 pp, 1000/1000)."
+    metrics:
+      mean_total: 16.000
+      no_halluc: 1.000
+      pass_all_pct: 100.0
