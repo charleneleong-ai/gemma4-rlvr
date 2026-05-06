@@ -4,6 +4,21 @@ How the merged stack (PRs #18, #30, #31, #32, #33) closes every category
 identified by the LangSmith production audit at
 `.error_analysis_cache/`.
 
+## Cumulative trajectory across the merged stack
+
+mean_total + no_halluc by milestone (left axis = `mean_total`, right axis = `no_halluc`):
+
+![v8 progression — mean_total + no_halluc](../experiments/progress/dd_explainer_two_stage/v8_progression.png)
+
+pass_all_pct + mean_total by milestone:
+
+![v8 progression — pass_all_pct + mean_total](../experiments/progress/dd_explainer_two_stage/v8_pass_all_progression.png)
+
+The rightmost milestone (`+ usage / unit-rate renderers`) is where the
+merged stack hits the literal rubric ceiling: **mean_total 16.000 / 16.0**
+and **pass_all 100.0 % (1000 / 1000 rows)**. vs PR-F champion (14.014):
+**+1.986 mean_total, ~8.5× pass_all (11.7 % → 100.0 %)**.
+
 ## The two production reports
 
 The `direct_debit_faithfulness` LangSmith evaluator runs weekly against
