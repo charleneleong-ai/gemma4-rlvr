@@ -23,7 +23,7 @@ from dd_explainer_data_generator import DirectDebitExplainerResponse, Trigger
 # Bumped whenever a reward function's scoring formula changes — written into
 # `_aggregate_scores` output so charts/results.jsonl don't silently mix
 # rubric versions across runs. Format: YYYY-MM-DD-shortdesc.
-RUBRIC_VERSION = "2026-05-05-well-formed-relaxed-to-4"
+RUBRIC_VERSION = "2026-05-06-tariff-regex-accepts-digit-first"
 
 # Reverted to the uncapped rubric (matching E1 champion) for the data-regen
 # experiment. Rationale: E14 showed that capping the no_halluc penalty makes
@@ -181,7 +181,12 @@ _PREV_AMOUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _TARIFF_RE = re.compile(
-    r"(?:tariff|contract|plan)\s+(?:called\s+|named\s+)?['\"]?([A-Z][A-Za-z0-9 &-]{2,40})['\"]?"
+    # First name char accepts [A-Z0-9] so "2-Year Fixed" / "5-Year Capped" satisfy
+    # this citation check (the prior [A-Z]-only anchor blocked 22% of rows whose
+    # current tariff was digit-first, even when the tariff was correctly cited
+    # in the prose). Lowercase still rejected so we don't match arbitrary words
+    # like "tariff something".
+    r"(?:tariff|contract|plan)\s+(?:called\s+|named\s+)?['\"]?([A-Z0-9][A-Za-z0-9 &-]{2,40})['\"]?"
 )
 _PERCENT_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*%")
 _UNDERPAY_RE = re.compile(r"\bunderpa(?:y|id|ying|yment)\b", re.IGNORECASE)

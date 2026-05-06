@@ -90,6 +90,58 @@ def test_new_format_invalid_slots_fail_both(input_json, gt):
     assert s["no_hallucinated_facts_slots"] < 0
 
 
+def test_digit_first_tariff_name_satisfies_regex():
+    """2026-05-06 rubric bump: `_TARIFF_RE` first-char anchor changed from
+    `[A-Z]` to `[A-Z0-9]` so tariff names like '2-Year Fixed' / '5-Year Capped'
+    can satisfy the no_halluc citation check. Prior 22% of n=1000 rows were
+    structurally locked out of passing this rubric regardless of phrasing.
+    """
+    inp = {
+        "account_context": {
+            "contract_history": [{
+                "tariff_name": "2-Year Fixed",
+                "contract_rates_history": [
+                    {"rates": [{"change_since_previous_rate_percent": 0.0}]}
+                ],
+            }],
+        },
+        "latest_dd_change": {"dd_amount": 100.0, "dd_amount_change": 0.0},
+    }
+    c = json.dumps({"explanations": [{
+        "trigger": "Missed/bounced DD payments",
+        "header": "Missed payments",
+        "explanation": "On your tariff 2-Year Fixed, we identified one missed payment.",
+    }]})
+    s = score_completion(c, ["Missed/bounced DD payments"], inp)
+    # Pre-fix: would trip inaction loophole (no recognized tariff citation) -> 0.0
+    # Post-fix: regex matches "tariff 2-Year Fixed" -> +1.0
+    assert s["no_hallucinated_facts"] == 1.0
+
+
+def test_digit_first_tariff_invalid_still_caught():
+    """Sanity: the regex change accepts the FORM of a digit-first name but
+    still rejects names not in the input. '9-Year Fake' isn't a real tariff —
+    must score < 0."""
+    inp = {
+        "account_context": {
+            "contract_history": [{
+                "tariff_name": "2-Year Fixed",
+                "contract_rates_history": [
+                    {"rates": [{"change_since_previous_rate_percent": 0.0}]}
+                ],
+            }],
+        },
+        "latest_dd_change": {"dd_amount": 100.0, "dd_amount_change": 0.0},
+    }
+    c = json.dumps({"explanations": [{
+        "trigger": "Missed/bounced DD payments",
+        "header": "Missed payments",
+        "explanation": "On your tariff 9-Year Fake, we identified one missed payment.",
+    }]})
+    s = score_completion(c, ["Missed/bounced DD payments"], inp)
+    assert s["no_hallucinated_facts"] < 0
+
+
 def test_slot_valid_but_prose_adds_extra_halluc(input_json, gt):
     """Critical case — slots are valid but prose mentions an additional invalid fact.
     Slot-only rubric is fooled (+1); rendered-prose rubric catches it (-3).
